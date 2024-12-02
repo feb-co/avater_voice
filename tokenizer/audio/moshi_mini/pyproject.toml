@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "moshi_mini"
+version = "0.0.1"
+description = "the audio tokenizer of Moshi"
+authors = ["Laurent Mazaré <laurent@kyutai.org>"]
+packages = [
+    { include = "mini" },
+]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+audiotools = ">= 0.7.2"
+python = ">=3.9,<4.0"
+numpy = ">= 1.26, < 2.2"
+safetensors = ">= 0.4.0, < 0.5"
+huggingface-hub = ">= 0.24, < 0.25"
+einops = ">= 0.7"
+sentencepiece = ">= 0.2"
+sounddevice = ">= 0.5"
+sphn = ">= 0.1.4"
+torch = ">= 2.2.0, < 2.5"
+aiohttp = ">=3.10.5, <3.11"
+
+[tool.poetry.group.test.dependencies]
+pytest = "^8.2.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
