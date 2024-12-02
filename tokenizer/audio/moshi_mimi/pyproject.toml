@@ -1,10 +1,10 @@
 [tool.poetry]
-name = "moshi_mini"
+name = "moshi_mimi"
 version = "0.0.1"
 description = "the audio tokenizer of Moshi"
 authors = ["Laurent Mazaré <laurent@kyutai.org>"]
 packages = [
-    { include = "mini" },
+    { include = "mimi" },
 ]
 readme = "README.md"
 
