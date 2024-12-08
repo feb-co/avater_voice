@@ -1,16 +1,27 @@
 """PyTorch LLaMA TTS model."""
 
 import math
+from typing import List, Optional, Tuple, Union
+
 import torch
 from torch import nn
+
+from transformers.utils import (
+    is_flash_attn_greater_or_equal_2_10,
+    logging
+)
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.llama.modeling_llama import (
+    ACT2FN,
     LlamaForCausalLM,
-    LlamaMLP,
     LlamaRMSNorm,
+    LlamaRotaryEmbedding
 )
 
 from .configuration_llama_tts import LlamaTTSConfig
+
+
+logger = logging.get_logger(__name__)
 
 
 class AdapterAudioEmbedding(nn.Embedding):
@@ -26,7 +37,213 @@ class AdapterAudioEmbedding(nn.Embedding):
         return super().forward(input_ids) * self.embed_scale
 
 
-class TTSAdapterFlashAttention2(LlamaAttention):
+class TTSAdapterMLP(nn.Module):
+    def __init__(self, config: LlamaTTSConfig):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.tts_adapter_hidden_size
+        self.intermediate_size = config.tts_adapter_intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        if self.config.pretraining_tp > 1:
+            slice = self.intermediate_size // self.config.pretraining_tp
+            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
+            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
+            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
+
+            gate_proj = torch.cat(
+                [F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
+            )
+            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
+
+            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
+            down_proj = [
+                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
+            ]
+            down_proj = sum(down_proj)
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        return down_proj
+
+
+class TTSAdapterAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: LlamaTTSConfig, layer_idx: Optional[int] = None, encoder_attn=False):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.encoder_attn = encoder_attn
+        
+        if layer_idx is None:
+            logger.warning_once(
+                f"Instantiating {self.__class__.__name__} without passing a `layer_idx` is not recommended and will "
+                "lead to errors during the forward call if caching is used. Please make sure to provide a `layer_idx` "
+                "when creating this class."
+            )
+
+        self.hidden_size = config.tts_adapter_hidden_size
+        self.attention_dropout = config.tts_adapter_attention_dropout
+        self.num_heads = config.tts_adapter_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_key_value_heads = self.num_heads // 4
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.max_position_embeddings = config.max_position_embeddings
+        self.rope_theta = config.rope_theta
+        self.is_causal = True
+
+        if (self.head_dim * self.num_heads) != self.hidden_size:
+            raise ValueError(
+                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
+                f" and `num_heads`: {self.num_heads})."
+            )
+
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.k_proj = nn.Linear(
+            config.hidden_size if self.encoder_attn else self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size if self.encoder_attn else self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=config.attention_bias)
+
+        # TODO (joao): remove in v4.45 (RoPE is computed in the model, not in the decoder layers)
+        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        key_value_states: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+
+        # if key_value_states are provided this layer is used as a cross-attention layer
+        # for the decoder
+        is_cross_attention = key_value_states is not None
+
+        bsz, tgt_len, _ = hidden_states.size()
+
+        # get query proj
+        query_states = self.q_proj(hidden_states) * self.scaling
+        # get key, value proj
+        # `past_key_value[0].shape[2] == key_value_states.shape[1]`
+        # is checking that the `sequence_length` of the `past_key_value` is the same as
+        # the provided `key_value_states` to support prefix tuning
+        if (
+            is_cross_attention
+            and past_key_value is not None
+            and past_key_value[0].shape[2] == key_value_states.shape[1]
+        ):
+            # reuse k,v, cross_attentions
+            key_states = past_key_value[0]
+            value_states = past_key_value[1]
+        elif is_cross_attention:
+            # cross_attentions
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
+        elif past_key_value is not None:
+            # reuse k, v, self_attention
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        else:
+            # self_attention
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+
+        if self.is_decoder:
+            # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
+            # Further calls to cross_attention layer can then reuse all cross-attention
+            # key/value_states (first "if" case)
+            # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
+            # all previous decoder key/value_states. Further calls to uni-directional self-attention
+            # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
+            # if encoder bi-directional self-attention `past_key_value` is always `None`
+            past_key_value = (key_states, value_states)
+
+        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
+        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
+        key_states = key_states.reshape(*proj_shape)
+        value_states = value_states.reshape(*proj_shape)
+
+        src_len = key_states.size(1)
+        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+
+        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
+            raise ValueError(
+                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, 1, tgt_len, src_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+
+        if layer_head_mask is not None:
+            if layer_head_mask.size() != (self.num_heads,):
+                raise ValueError(
+                    f"Head mask for a single layer should be of size {(self.num_heads,)}, but is"
+                    f" {layer_head_mask.size()}"
+                )
+            attn_weights = layer_head_mask.view(1, -1, 1, 1) * attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+
+        if output_attentions:
+            # this operation is a bit awkward, but it's required to
+            # make sure that attn_weights keeps its gradient.
+            # In order to do so, attn_weights have to be reshaped
+            # twice and have to be reused in the following
+            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
+        else:
+            attn_weights_reshaped = None
+
+        attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+
+        attn_output = torch.bmm(attn_probs, value_states)
+
+        if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz * self.num_heads, tgt_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
+        attn_output = attn_output.transpose(1, 2)
+
+        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
+        # partitioned across GPUs when using tensor-parallelism.
+        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+
+        attn_output = self.out_proj(attn_output)
+
+        return attn_output, attn_weights_reshaped, past_key_value
+
+
+class TTSAdapterFlashAttention2(TTSAdapterAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -149,16 +366,20 @@ class TTSAdapterLayer(nn.Module):
     def __init__(self, config: LlamaTTSConfig, layer_idx: int):
         super().__init__()
         self.dropout = config.dropout
-        self.embed_dim = config.hidden_size
+        self.embed_dim = config.tts_adapter_hidden_size
 
         self.self_attn = TTS_ADAPTER_ATTENTION_CLASSES[config.tts_adapter_attn_implementation](config=config, layer_idx=layer_idx)
-        self.self_attn_layer_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.self_attn_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
-        self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config.tts_adapter_attn_implementation](config=config, layer_idx=layer_idx)
-        self.encoder_attn_layer_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config.tts_adapter_attn_implementation](
+            config=config,
+            layer_idx=layer_idx,
+            encoder_attn=True,
+        )
+        self.encoder_attn_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
-        self.mlp = LlamaMLP(config)
-        self.final_layer_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = TTSAdapterMLP(config)
+        self.final_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -262,10 +483,10 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         self.dropout = config.dropout
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
-        embed_scale = math.sqrt(config.hidden_size) if config.scale_embedding else 1.0
+        embed_scale = math.sqrt(config.tts_adapter_hidden_size) if config.scale_embedding else 1.0
 
         self.embed_tokens = AdapterAudioEmbedding(
-            config.audio_vocab_size, config.hidden_size, self.padding_idx, embed_scale=embed_scale
+            config.audio_vocab_size, config.tts_adapter_hidden_size, self.padding_idx, embed_scale=embed_scale
         )
 
         self.layers = nn.ModuleList(
@@ -274,7 +495,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
         self._use_sdpa = config._attn_implementation == "sdpa"
 
-        self.layernorm_embedding = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layernorm_embedding = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
