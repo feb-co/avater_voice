@@ -2,6 +2,7 @@
 
 import os
 import math
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -9,7 +10,8 @@ from torch import nn
 
 from transformers.utils import (
     is_flash_attn_greater_or_equal_2_10,
-    logging
+    logging,
+    ModelOutput
 )
 from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_utils import (
@@ -22,8 +24,7 @@ from transformers.modeling_utils import (
     PreTrainedModel
 )
 from transformers.modeling_outputs import (
-    BaseModelOutputWithPastAndCrossAttentions,
-    CausalLMOutputWithPast
+    BaseModelOutputWithPast,
 )
 from transformers.models.llama.modeling_llama import (
     ACT2FN,
@@ -31,11 +32,99 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
+from transformers.models.bart.modeling_bart import (
+    shift_tokens_right,
+)
 
 from .configuration_llama_tts import LlamaTTSConfig
 
 
 logger = logging.get_logger(__name__)
+
+
+@dataclass
+class AdapterModelOutputWithPastAndCrossAttentions(ModelOutput):
+    """
+    Base class for model's outputs that may also contain a past key/values (to speed up sequential decoding).
+
+    Args:
+        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the model.
+
+            If `past_key_values` is used only the last hidden-state of the sequences of shape `(batch_size, 1,
+            hidden_size)` is output.
+        past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape
+            `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and optionally if
+            `config.is_encoder_decoder=True` 2 additional tensors of shape `(batch_size, num_heads,
+            encoder_sequence_length, embed_size_per_head)`.
+
+            Contains pre-computed hidden-states (key and values in the self-attention blocks and optionally if
+            `config.is_encoder_decoder=True` in the cross-attention blocks) that can be used (see `past_key_values`
+            input) to speed up sequential decoding.
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
+            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
+        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+        cross_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` and `config.add_cross_attention=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights of the decoder's cross-attention layer, after the attention softmax, used to compute the
+            weighted average in the cross-attention heads.
+    """
+    logits: torch.FloatTensor = None
+    last_hidden_state: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    cross_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+
+
+@dataclass
+class Seq2SeqCausalLMOutputWithCrossAttentions(ModelOutput):
+    """
+    Base class for sequence-to-sequence causal language model (or autoregressive) outputs.
+
+    Args:
+        loss (`torch.FloatTensor` of shape `(1,)`, *optional*):
+            Language modeling loss (for next-token prediction) when labels are provided.
+        encoder_logits (`torch.FloatTensor`):
+            Prediction scores from the encoder language modeling head (scores for each vocabulary token before SoftMax).
+        encoder_past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*):
+            Cached key and value states in the encoder.
+        encoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*):
+            Hidden states output from each layer of the encoder.
+        encoder_attentions (`tuple(torch.FloatTensor)`, *optional*):
+            Attention weights from each layer of the encoder.
+        decoder_logits (`torch.FloatTensor`):
+            Prediction scores from the decoder language modeling head.
+        decoder_past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*):
+            Cached key and value states in the decoder.
+        decoder_hidden_states (`tuple(torch.FloatTensor)`, *optional*):
+            Hidden states output from each layer of the decoder.
+        decoder_attentions (`tuple(torch.FloatTensor)`, *optional*):
+            Self-attention weights from each layer of the decoder.
+        cross_attentions (`tuple(torch.FloatTensor)`, *optional*):
+            Cross-attention weights from each layer of the decoder.
+    """
+    loss: Optional[torch.FloatTensor] = None
+    encoder_logits: torch.FloatTensor = None
+    encoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    encoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    encoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    decoder_logits: torch.FloatTensor = None
+    decoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    decoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    decoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    cross_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
 def get_archive_file(
@@ -581,7 +670,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
+    ) -> Union[Tuple, AdapterModelOutputWithPastAndCrossAttentions]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -736,7 +825,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
                 for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
                 if v is not None
             )
-        return BaseModelOutputWithPastAndCrossAttentions(
+        return AdapterModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
@@ -799,11 +888,13 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        encoder_outputs: Optional[List[torch.FloatTensor]] = None,
+        encoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
         decoder_input_ids: Optional[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.LongTensor] = None,
-        encoder_outputs: Optional[List[torch.FloatTensor]] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        encoder_decoder_attention_mask: Optional[torch.LongTensor] = None,
+        decoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -811,7 +902,7 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[Tuple, Seq2SeqCausalLMOutputWithCrossAttentions]:
         r"""
         Args:
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -823,3 +914,52 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
 
         Example:
         """
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if labels is not None:
+            if use_cache:
+                logger.warning("The `use_cache` argument is changed to `False` since `labels` is provided.")
+            use_cache = False
+            if decoder_input_ids is None and decoder_inputs_embeds is None:
+                decoder_input_ids = shift_tokens_right(
+                    labels, self.config.pad_token_id, self.config.boa_token_id
+                )
+
+        if encoder_outputs is None:
+            encoder_outputs: BaseModelOutputWithPast = self.llm.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=encoder_past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+            )
+        elif return_dict and not isinstance(encoder_outputs, BaseModelOutputWithPast):
+            encoder_outputs = BaseModelOutputWithPast(
+                last_hidden_state=encoder_outputs[0],
+                past_key_values=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
+                hidden_states=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+                attentions=encoder_outputs[3] if len(encoder_outputs) > 3 else None,
+            )
+
+        decoder_outputs: AdapterModelOutputWithPastAndCrossAttentions = self.tts_adapter(
+            input_ids=decoder_input_ids,
+            attention_mask=decoder_attention_mask,
+            encoder_hidden_states=encoder_outputs[0],
+            encoder_attention_mask=encoder_decoder_attention_mask,
+            past_key_values=decoder_past_key_values,
+            inputs_embeds=decoder_inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=False,
+        )
+
+        return Seq2SeqCausalLMOutputWithCrossAttentions()
