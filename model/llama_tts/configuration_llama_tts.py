@@ -1,5 +1,7 @@
 """LLaMA TTS model configuration"""
 
+import os
+import json
 from transformers import LlamaConfig
 
 
@@ -18,6 +20,7 @@ class LlamaTTSConfig(LlamaConfig):
         tts_adapter_attention_dropout=0.0,
         boa_token_id=1,
         eoa_token_id=2,
+        llm_path=None,
         **kwargs,
     ):
         self.audio_vocab_size = audio_vocab_size
@@ -31,5 +34,12 @@ class LlamaTTSConfig(LlamaConfig):
         self.scale_embedding = 1.0
         self.boa_token_id = boa_token_id
         self.eoa_token_id = eoa_token_id
-
+        
+        if llm_path is not None:
+            llm_config_path = os.path.join(llm_path, "config.json")
+            llm_config = json.load(open(llm_config_path, "r", encoding="utf-8"))
+            del llm_config["architectures"]
+            del llm_config["model_type"]
+            kwargs.update(llm_config)
+        
         super().__init__(**kwargs)

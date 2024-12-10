@@ -1,5 +1,6 @@
 """PyTorch LLaMA TTS model."""
 
+import os
 import math
 from typing import List, Optional, Tuple, Union
 
@@ -11,7 +12,15 @@ from transformers.utils import (
     logging
 )
 from transformers.cache_utils import Cache, StaticCache
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import (
+    _add_variant,
+    get_checkpoint_shard_files,
+    SAFE_WEIGHTS_NAME,
+    SAFE_WEIGHTS_INDEX_NAME,
+    WEIGHTS_NAME,
+    WEIGHTS_INDEX_NAME,
+    PreTrainedModel
+)
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
     CausalLMOutputWithPast
@@ -27,6 +36,52 @@ from .configuration_llama_tts import LlamaTTSConfig
 
 
 logger = logging.get_logger(__name__)
+
+
+def get_archive_file(
+    pretrained_model_name_or_path,
+    subfolder="",
+    use_safetensors=True,
+    variant=None,
+):
+    if use_safetensors is not False and os.path.isfile(
+        os.path.join(pretrained_model_name_or_path, subfolder, _add_variant(SAFE_WEIGHTS_NAME, variant))
+    ):
+        # Load from a safetensors checkpoint
+        archive_file = os.path.join(
+            pretrained_model_name_or_path, subfolder, _add_variant(SAFE_WEIGHTS_NAME, variant)
+        )
+    elif use_safetensors is not False and os.path.isfile(
+        os.path.join(
+            pretrained_model_name_or_path, subfolder, _add_variant(SAFE_WEIGHTS_INDEX_NAME, variant)
+        )
+    ):
+        # Load from a sharded safetensors checkpoint
+        archive_file = os.path.join(
+            pretrained_model_name_or_path, subfolder, _add_variant(SAFE_WEIGHTS_INDEX_NAME, variant)
+        )
+        is_sharded = True
+    elif not use_safetensors and os.path.isfile(
+        os.path.join(pretrained_model_name_or_path, subfolder, _add_variant(WEIGHTS_NAME, variant))
+    ):
+        # Load from a PyTorch checkpoint
+        archive_file = os.path.join(
+            pretrained_model_name_or_path, subfolder, _add_variant(WEIGHTS_NAME, variant)
+        )
+    elif not use_safetensors and os.path.isfile(
+        os.path.join(pretrained_model_name_or_path, subfolder, _add_variant(WEIGHTS_INDEX_NAME, variant))
+    ):
+        # Load from a sharded PyTorch checkpoint
+        archive_file = os.path.join(
+            pretrained_model_name_or_path, subfolder, _add_variant(WEIGHTS_INDEX_NAME, variant)
+        )
+        is_sharded = True
+    else:
+        raise ValueError(
+            "we don't support other type 'archive_file' now!"
+        )
+    
+    return archive_file, is_sharded
 
 
 class AdapterAudioEmbedding(nn.Embedding):
@@ -693,6 +748,8 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
 class LlamaTTS(LlamaTTSPreTrainedModel):
     def __init__(self, config: LlamaTTSConfig):
         super().__init__(config)
+        
+        self.config = config
         self.audio_vocab_size = config.audio_vocab_size
 
         self.llm = LlamaForCausalLM(config)
@@ -707,6 +764,36 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
 
     def __repr__(self):
         return self.tts_adapter.__repr__()
+    
+    def load_llm_state_dict(self, llm_pretrained_model_name_or_path):
+        archive_file, is_sharded = get_archive_file(llm_pretrained_model_name_or_path)
+        if is_sharded:
+            archive_file, sharded_metadata = get_checkpoint_shard_files(
+                llm_pretrained_model_name_or_path,
+                archive_file,
+            )
+
+        state_dict = None
+
+        if is_sharded:
+            loaded_state_dict_keys = sharded_metadata["all_checkpoint_keys"]
+        else:
+            loaded_state_dict_keys = list(state_dict.keys())
+
+        (
+            self.llm,
+            missing_keys,
+            unexpected_keys,
+            mismatched_keys,
+            offload_index,
+            error_msgs,
+        ) = self._load_pretrained_model(
+            self.llm,
+            state_dict,
+            loaded_state_dict_keys,  # XXX: rename?
+            archive_file,
+            llm_pretrained_model_name_or_path
+        )
 
     def forward(
         self,
