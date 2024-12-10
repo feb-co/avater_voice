@@ -25,6 +25,7 @@ from transformers.modeling_utils import (
     PreTrainedModel
 )
 from transformers.models.llama.modeling_llama import (
+    apply_rotary_pos_emb,
     ACT2FN,
     LlamaForCausalLM,
     LlamaRMSNorm,
@@ -32,6 +33,10 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.models.bart.modeling_bart import (
     shift_tokens_right,
+    _prepare_4d_causal_attention_mask_for_sdpa,
+    _prepare_4d_causal_attention_mask,
+    _prepare_4d_attention_mask_for_sdpa,
+    _prepare_4d_attention_mask
 )
 
 from .configuration_llama_tts import LlamaTTSConfig
@@ -635,19 +640,16 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         self.max_target_positions = config.max_position_embeddings
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
         self._use_sdpa = config._attn_implementation == "sdpa"
-
         embed_scale = math.sqrt(config.tts_adapter_hidden_size) if config.scale_embedding else 1.0
 
         self.embed_tokens = AdapterAudioEmbedding(
             config.audio_vocab_size, config.tts_adapter_hidden_size, self.padding_idx, embed_scale=embed_scale
         )
-
         self.layers = nn.ModuleList(
             [TTSAdapterLayer(config, layer_idx) for layer_idx in range(config.tts_adapter_hidden_layers)]
         )
-
         self.layernorm_embedding = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
-
+        self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.adapter_head = nn.Linear(config.tts_adapter_hidden_size, config.audio_vocab_size, bias=False)
 
         self.gradient_checkpointing = False
@@ -670,8 +672,6 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
@@ -708,8 +708,8 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         if self._use_flash_attention_2:
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-        elif self._use_sdpa and not output_attentions and cross_attn_head_mask is None:
-            # output_attentions=True & cross_attn_head_mask can not be supported when using SDPA, and we fall back on
+        elif self._use_sdpa and not output_attentions:
+            # output_attentions=True can not be supported when using SDPA, and we fall back on
             # the manual implementation that requires a 4D causal mask in all cases.
             attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
                 attention_mask,
@@ -727,8 +727,8 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         if encoder_hidden_states is not None and encoder_attention_mask is not None:
             if self._use_flash_attention_2:
                 encoder_attention_mask = encoder_attention_mask if 0 in encoder_attention_mask else None
-            elif self._use_sdpa and cross_attn_head_mask is None and not output_attentions:
-                # output_attentions=True & cross_attn_head_mask can not be supported when using SDPA, and we fall back on
+            elif self._use_sdpa and not output_attentions:
+                # output_attentions=True can not be supported when using SDPA, and we fall back on
                 # the manual implementation that requires a 4D causal mask in all cases.
                 # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
                 encoder_attention_mask = _prepare_4d_attention_mask_for_sdpa(
