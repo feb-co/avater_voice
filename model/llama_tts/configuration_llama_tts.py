@@ -8,7 +8,7 @@ class LlamaTTSConfig(LlamaConfig):
 
     def __init__(
         self,
-        audio_vocab_size=32000,
+        audio_vocab_size=1000,
         tts_adapter_hidden_layers=6,
         tts_adapter_hidden_size=1024,
         tts_adapter_intermediate_size=2744,

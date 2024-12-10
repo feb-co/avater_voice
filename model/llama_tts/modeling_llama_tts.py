@@ -10,7 +10,11 @@ from transformers.utils import (
     is_flash_attn_greater_or_equal_2_10,
     logging
 )
+from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPastAndCrossAttentions,
+)
 from transformers.models.llama.modeling_llama import (
     ACT2FN,
     LlamaForCausalLM,
@@ -365,7 +369,7 @@ TTS_ADAPTER_ATTENTION_CLASSES = {
 class TTSAdapterLayer(nn.Module):
     def __init__(self, config: LlamaTTSConfig, layer_idx: int):
         super().__init__()
-        self.dropout = config.dropout
+        self.dropout = config.tts_adapter_dropout
         self.embed_dim = config.tts_adapter_hidden_size
 
         self.self_attn = TTS_ADAPTER_ATTENTION_CLASSES[config.tts_adapter_attn_implementation](config=config, layer_idx=layer_idx)
@@ -480,7 +484,7 @@ class LlamaTTSPreTrainedModel(PreTrainedModel):
 class TTSAdapter(LlamaTTSPreTrainedModel):
     def __init__(self, config: LlamaTTSConfig):
         super().__init__(config)
-        self.dropout = config.dropout
+        self.dropout = config.tts_adapter_dropout
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
         embed_scale = math.sqrt(config.tts_adapter_hidden_size) if config.scale_embedding else 1.0
@@ -490,7 +494,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         )
 
         self.layers = nn.ModuleList(
-            [TTSAdapterLayer(config, layer_idx) for layer_idx in range(config.adapter_hidden_layers)]
+            [TTSAdapterLayer(config, layer_idx) for layer_idx in range(config.tts_adapter_hidden_layers)]
         )
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
         self._use_sdpa = config._attn_implementation == "sdpa"
@@ -695,3 +699,13 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        
+        # frozen llm
+        for name, param in self.llm.named_parameters():
+            param.requires_grad_(False)
+
+    def __repr__(self):
+        return self.tts_adapter.__repr__()
+    
+    def forawrd(self,):
+        pass
