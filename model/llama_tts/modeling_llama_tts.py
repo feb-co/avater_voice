@@ -14,6 +14,7 @@ from transformers.utils import (
     ModelOutput
 )
 from transformers.cache_utils import Cache, StaticCache
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import (
     _add_variant,
     get_checkpoint_shard_files,
@@ -22,9 +23,6 @@ from transformers.modeling_utils import (
     WEIGHTS_NAME,
     WEIGHTS_INDEX_NAME,
     PreTrainedModel
-)
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
 )
 from transformers.models.llama.modeling_llama import (
     ACT2FN,
@@ -627,11 +625,17 @@ class LlamaTTSPreTrainedModel(PreTrainedModel):
 
 
 class TTSAdapter(LlamaTTSPreTrainedModel):
+    _tied_weights_keys = ["embed_tokens.weight", "adapter_head.weight"]
+
     def __init__(self, config: LlamaTTSConfig):
         super().__init__(config)
+        self.config = config
         self.dropout = config.tts_adapter_dropout
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_position_embeddings
+        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self._use_sdpa = config._attn_implementation == "sdpa"
+
         embed_scale = math.sqrt(config.tts_adapter_hidden_size) if config.scale_embedding else 1.0
 
         self.embed_tokens = AdapterAudioEmbedding(
@@ -641,14 +645,18 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         self.layers = nn.ModuleList(
             [TTSAdapterLayer(config, layer_idx) for layer_idx in range(config.tts_adapter_hidden_layers)]
         )
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
-        self._use_sdpa = config._attn_implementation == "sdpa"
 
         self.layernorm_embedding = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
+
+        self.adapter_head = nn.Linear(config.tts_adapter_hidden_size, config.audio_vocab_size, bias=False)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+
+    def _tie_weights(self):
+        if self.config.tie_audio_embeddings:
+            self._tie_or_clone_weights(self.adapter_head, self.embed_tokens)
 
     def get_input_embeddings(self):
         return self.embed_tokens

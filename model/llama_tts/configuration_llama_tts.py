@@ -21,6 +21,7 @@ class LlamaTTSConfig(LlamaConfig):
         boa_token_id=1,
         eoa_token_id=2,
         llm_path=None,
+        tie_audio_embeddings=False,
         **kwargs,
     ):
         self.audio_vocab_size = audio_vocab_size
@@ -34,7 +35,8 @@ class LlamaTTSConfig(LlamaConfig):
         self.scale_embedding = 1.0
         self.boa_token_id = boa_token_id
         self.eoa_token_id = eoa_token_id
-        
+        self.tie_audio_embeddings = tie_audio_embeddings
+
         if llm_path is not None:
             llm_config_path = os.path.join(llm_path, "config.json")
             llm_config = json.load(open(llm_config_path, "r", encoding="utf-8"))
