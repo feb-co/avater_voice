@@ -1,3 +1,4 @@
+import sys
 import torch
 from typing import Tuple
 from transformers import AutoConfig, AutoModel
@@ -49,5 +50,5 @@ def test_load(model_path):
 
 
 if __name__ == "__main__":
-    model_path = "/mnt/ceph/licheng/avater_voice/model/llama_tts"
+    model_path = sys.argv[1]
     test_load(model_path)
