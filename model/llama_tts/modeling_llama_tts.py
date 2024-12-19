@@ -34,6 +34,7 @@ from transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
+    LlamaConfig
 )
 from transformers.models.bart.modeling_bart import (
     shift_tokens_right,
@@ -282,8 +283,8 @@ class TTSAdapterAttention(nn.Module):
         )
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=config.attention_bias)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int, num_heads: int):
+        return tensor.view(bsz, seq_len, num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
@@ -302,11 +303,15 @@ class TTSAdapterAttention(nn.Module):
         bsz, tgt_len, _ = hidden_states.size()
 
         # Proj Q,K,V based on past_key_value
-        query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz)
-        key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-        value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-        
-        # Rope embedding
+        query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
+        if is_cross_attention:
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+        else:
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
+
+        # Rotary Embedding
         if is_cross_attention:
             cos, sin = position_embeddings
             e_cos, e_sin = encoder_position_embeddings
@@ -395,7 +400,7 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
         value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
 
-        # Rope embedding
+        # Rotary Embedding
         if is_cross_attention:
             cos, sin = position_embeddings
             e_cos, e_sin = encoder_position_embeddings
@@ -614,7 +619,16 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         self.adapter_head = nn.Linear(config.tts_adapter_hidden_size, config.audio_vocab_size, bias=False)
 
         self.norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+
+        rope_embedding_config = LlamaConfig(
+            rope_theta=config.rope_theta,
+            partial_rotary_factor=config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0,
+            hidden_size=config.tts_adapter_hidden_size,
+            num_attention_heads=config.tts_adapter_attention_heads,
+            rope_scaling=config.rope_scaling,
+            max_position_embeddings=config.max_position_embeddings
+        )
+        self.rotary_emb = LlamaRotaryEmbedding(config=rope_embedding_config)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -749,7 +763,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
-        next_decoder_cache = None
+        next_decoder_cache = () if use_cache else None
 
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
