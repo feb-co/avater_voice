@@ -15,7 +15,6 @@ class LlamaTTSConfig(LlamaConfig):
         tts_adapter_hidden_size=1024,
         tts_adapter_intermediate_size=2744,
         tts_adapter_attention_heads=16,
-        tts_adapter_attn_implementation="eager",
         tts_adapter_dropout=0.0,
         tts_adapter_attention_dropout=0.0,
         boa_token_id=1,
@@ -29,7 +28,6 @@ class LlamaTTSConfig(LlamaConfig):
         self.tts_adapter_hidden_size = tts_adapter_hidden_size
         self.tts_adapter_intermediate_size = tts_adapter_intermediate_size
         self.tts_adapter_attention_heads = tts_adapter_attention_heads
-        self.tts_adapter_attn_implementation = tts_adapter_attn_implementation
         self.tts_adapter_dropout = tts_adapter_dropout
         self.tts_adapter_attention_dropout = tts_adapter_attention_dropout
         self.scale_embedding = 1.0

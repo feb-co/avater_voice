@@ -262,7 +262,6 @@ class TTSAdapterAttention(nn.Module):
         self.num_key_value_heads = self.num_heads // 4
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -299,12 +298,11 @@ class TTSAdapterAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
-        is_cross_attention = key_value_states is not None
         bsz, tgt_len, _ = hidden_states.size()
 
         # Proj Q,K,V based on past_key_value
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
-        if is_cross_attention:
+        if self.encoder_attn:
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
         else:
@@ -312,7 +310,7 @@ class TTSAdapterAttention(nn.Module):
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
 
         # Rotary Embedding
-        if is_cross_attention:
+        if self.encoder_attn:
             cos, sin = position_embeddings
             e_cos, e_sin = encoder_position_embeddings
             query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin)
@@ -370,9 +368,6 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
 
-    def _reshape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -392,16 +387,19 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
             )
 
         output_attentions = False
-        is_cross_attention = key_value_states is not None
         bsz, q_len, _ = hidden_states.size()
 
         # Proj Q,K,V based on past_key_value
-        query_states = self._shape(self.q_proj(hidden_states), q_len, bsz)
-        key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-        value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+        query_states = self._shape(self.q_proj(hidden_states), q_len, bsz, self.num_heads)
+        if self.encoder_attn:
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+        else:
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
 
         # Rotary Embedding
-        if is_cross_attention:
+        if self.encoder_attn:
             cos, sin = position_embeddings
             e_cos, e_sin = encoder_position_embeddings
             query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin)
@@ -470,9 +468,101 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         return attn_output, attn_weights, past_key_value
 
 
+class TTSAdapterSdpaAttention(TTSAdapterAttention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        key_value_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[torch.Tensor] = None,
+        encoder_position_embeddings: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if output_attentions:
+            # TODO: Improve this warning with e.g. `model.config._attn_implementation = "manual"` once this is implemented.
+            logger.warning_once(
+                "TTSModel is using TTSAdapterFlashAttention2, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True` not None. Falling back to the manual attention"
+                ' implementation, but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            )
+            return super().forward(
+                hidden_states=hidden_states,
+                key_value_states=key_value_states,
+                attention_mask=attention_mask,
+                position_embeddings=position_embeddings,
+                encoder_position_embeddings=encoder_position_embeddings,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position
+            )
+        
+        bsz, tgt_len, _ = hidden_states.size()
+
+        # Proj Q,K,V based on past_key_value
+        query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
+        if self.encoder_attn:
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+        else:
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
+
+        # Rotary Embedding
+        if self.encoder_attn:
+            cos, sin = position_embeddings
+            e_cos, e_sin = encoder_position_embeddings
+            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin)
+            cache_kwargs = {"sin": sin, "cos": cos, "e_sin": e_sin, "e_cos": e_cos, "cache_position": cache_position}
+        else:
+            cos, sin = position_embeddings
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+
+        # Past Key Value
+        if past_key_value is not None:
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        # Attn
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
+        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
+        # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
+        is_causal = True if self.is_causal and attention_mask is None and tgt_len > 1 else False
+
+        # NOTE: SDPA with memory-efficient backend is currently (torch==2.1.2) bugged when using non-contiguous inputs and a custom attn_mask,
+        # but we are fine here as `_shape` do call `.contiguous()`. Reference: https://github.com/pytorch/pytorch/issues/112577
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attention_mask,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            is_causal=is_causal,
+        )
+
+        if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, tgt_len, -1)
+
+        attn_output = self.o_proj(attn_output)
+        
+        return attn_output, None, past_key_value
+
+
 TTS_ADAPTER_ATTENTION_CLASSES = {
     "eager": TTSAdapterAttention,
     "flash_attention_2": TTSAdapterFlashAttention2,
+    "sdpa": TTSAdapterSdpaAttention,
 }
 
 
@@ -482,10 +572,10 @@ class TTSAdapterLayer(nn.Module):
         self.dropout = config.tts_adapter_dropout
         self.embed_dim = config.tts_adapter_hidden_size
 
-        self.self_attn = TTS_ADAPTER_ATTENTION_CLASSES[config.tts_adapter_attn_implementation](config=config, layer_idx=layer_idx)
+        self.self_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
         self.self_attn_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
-        self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config.tts_adapter_attn_implementation](
+        self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation if config._attn_implementation != "flash_attention_2" else "eager"](
             config=config,
             layer_idx=layer_idx,
             encoder_attn=True,
@@ -670,7 +760,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         if encoder_hidden_states is not None and encoder_attention_mask is not None:
             if self._use_flash_attention_2:
                 encoder_attention_mask = encoder_attention_mask if 0 in encoder_attention_mask else None
-            elif self._use_sdpa and not output_attentions:
+            elif self._use_sdpa and not output_attentions and len(encoder_attention_mask.size())==2:
                 # output_attentions=True can not be supported when using SDPA, and we fall back on
                 # the manual implementation that requires a 4D causal mask in all cases.
                 # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
@@ -679,11 +769,14 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
                     inputs_embeds.dtype,
                     tgt_len=input_shape[-1],
                 )
-            else:
+            elif len(encoder_attention_mask.size())==2:
                 # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
                 encoder_attention_mask = _prepare_4d_attention_mask(
                     encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
                 )
+            else:
+                encoder_attention_mask = 1.0 - encoder_attention_mask
+                encoder_attention_mask = encoder_attention_mask.masked_fill(encoder_attention_mask.to(torch.bool), torch.finfo(inputs_embeds.dtype).min)
 
         return attention_mask, encoder_attention_mask
 
