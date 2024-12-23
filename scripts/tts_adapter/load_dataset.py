@@ -3,7 +3,6 @@ import sys
 from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
-import datasets
 from datasets import DatasetDict, load_dataset, load_from_disk
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -158,7 +157,6 @@ def load_single_dataset(data_files):
     )
 
     return align_dataset(dataset, dataset_attr)
-
 
 
 if __name__ == "__main__":
