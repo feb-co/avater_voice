@@ -29,7 +29,8 @@ def forward_model(
         attention_mask=attention_mask,
         decoder_input_ids=decoder_input_ids,
         decoder_attention_mask=decoder_attention_mask,
-        encoder_decoder_attention_mask=encoder_decoder_attention_mask
+        encoder_decoder_attention_mask=encoder_decoder_attention_mask,
+        labels=decoder_input_ids
     )
     return outputs
 
@@ -55,7 +56,7 @@ if __name__ == "__main__":
     dummy_decoder_attention_mask[1, -20:] = 0
     dummy_encoder_decoder_attention_mask = torch.randint(0, 1, (2, 1, 512, 2048), dtype=torch.long)
 
-    forward_model(
+    outputs = forward_model(
         model,
         dummy_input_ids,
         dummy_attention_mask,
@@ -63,3 +64,4 @@ if __name__ == "__main__":
         dummy_decoder_attention_mask,
         dummy_encoder_decoder_attention_mask
     )
+    print(outputs)

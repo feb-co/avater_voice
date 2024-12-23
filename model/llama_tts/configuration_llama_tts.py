@@ -10,7 +10,9 @@ class LlamaTTSConfig(LlamaConfig):
 
     def __init__(
         self,
-        audio_vocab_size=1000,
+        audio_vocab_size=16392,
+        code_size=2048,
+        code_layers=8,
         tts_adapter_hidden_layers=6,
         tts_adapter_hidden_size=1024,
         tts_adapter_intermediate_size=2744,
@@ -24,6 +26,8 @@ class LlamaTTSConfig(LlamaConfig):
         **kwargs,
     ):
         self.audio_vocab_size = audio_vocab_size
+        self.code_size = code_size
+        self.code_layers = code_layers
         self.tts_adapter_hidden_layers = tts_adapter_hidden_layers
         self.tts_adapter_hidden_size = tts_adapter_hidden_size
         self.tts_adapter_intermediate_size = tts_adapter_intermediate_size

@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
 from transformers.utils import (
@@ -15,7 +16,7 @@ from transformers.utils import (
     ModelOutput
 )
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
-from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import (
     _add_variant,
@@ -37,7 +38,6 @@ from transformers.models.llama.modeling_llama import (
     LlamaConfig
 )
 from transformers.models.bart.modeling_bart import (
-    shift_tokens_right,
     _prepare_4d_causal_attention_mask_for_sdpa,
     _prepare_4d_causal_attention_mask,
     _prepare_4d_attention_mask_for_sdpa,
@@ -909,14 +909,20 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
             next_cache = next_cache.to_legacy_cache()
+        
+        # Logits
+        logits = self.adapter_head(hidden_states)
+        logits = logits.float()
 
         if not return_dict:
             return tuple(
                 v
-                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
+                for v in [logits, hidden_states, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
                 if v is not None
             )
+
         return AdapterModelOutputWithPastAndCrossAttentions(
+            logits=logits,
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
@@ -1011,46 +1017,57 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if labels is not None:
-            if use_cache:
-                logger.warning("The `use_cache` argument is changed to `False` since `labels` is provided.")
-            use_cache = False
-            if decoder_input_ids is None and decoder_inputs_embeds is None:
-                decoder_input_ids = shift_tokens_right(
-                    labels, self.config.pad_token_id, self.config.boa_token_id
-                )
-
         if encoder_outputs is None:
-            encoder_outputs: BaseModelOutputWithPast = self.llm.model(
+            encoder_outputs: CausalLMOutputWithPast = self.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=encoder_past_key_values,
                 inputs_embeds=inputs_embeds,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
+                output_hidden_states=True,
+                return_dict=True,
                 cache_position=cache_position,
-            )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutputWithPast):
-            encoder_outputs = BaseModelOutputWithPast(
-                last_hidden_state=encoder_outputs[0],
-                past_key_values=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
-                hidden_states=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
-                attentions=encoder_outputs[3] if len(encoder_outputs) > 3 else None,
             )
 
         decoder_outputs: AdapterModelOutputWithPastAndCrossAttentions = self.tts_adapter(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_outputs[0],
+            encoder_hidden_states=encoder_outputs.hidden_states[-1],
             encoder_attention_mask=encoder_decoder_attention_mask,
             past_key_values=decoder_past_key_values,
             inputs_embeds=decoder_inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=False,
+            return_dict=True,
         )
 
-        return Seq2SeqCausalLMOutputWithCrossAttentions()
+        # Loss
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = decoder_outputs.logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.audio_vocab_size)
+            shift_labels = shift_labels.view(-1)
+
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        return Seq2SeqCausalLMOutputWithCrossAttentions(
+            loss=loss,
+            encoder_logits=encoder_outputs.logits,
+            encoder_past_key_values=encoder_outputs.past_key_values,
+            encoder_hidden_states=encoder_outputs.hidden_states,
+            encoder_attentions=encoder_outputs.attentions,
+            decoder_logits=decoder_outputs.logits,
+            decoder_past_key_values=decoder_outputs.past_key_values,
+            decoder_hidden_states=decoder_outputs.hidden_states,
+            decoder_attentions=decoder_outputs.attentions,
+            cross_attentions=decoder_outputs.cross_attentions
+        )
