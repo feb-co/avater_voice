@@ -161,4 +161,4 @@ def load_single_dataset(data_files):
 
 if __name__ == "__main__":
     audio_file = sys.argv[1]
-    load_single_dataset([audio_file])
+    dataset = load_single_dataset([audio_file])
