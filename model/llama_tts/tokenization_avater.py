@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 from transformers.utils import logging
+from transformers import AutoTokenizer
 
 
 class AvaterTokenizer(PreTrainedTokenizer):
@@ -20,3 +21,5 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 f"Can't find a text vocabulary file at path '{text_tokenizer_path}'. To load the vocabulary from a Google pretrained"
                 " model use `tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)`"
             )
+        
+        self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
