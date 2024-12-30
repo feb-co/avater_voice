@@ -14,6 +14,8 @@ class AvaterTokenizer(PreTrainedTokenizer):
         audio_special_token: Optional[Dict[str, Any]] = None,
         short_wait_string="<|SHORT_WAIT|>",
         long_wait_string="<|LONG_WAIT|>",
+        audio_tokenizer="moshi_mimi",
+        asr_tokenizer="whisper",
         **kwargs
     ):
         if not os.path.isdir(text_tokenizer_path):
