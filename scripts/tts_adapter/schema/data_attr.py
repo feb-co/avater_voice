@@ -52,6 +52,7 @@ class DatasetAttr:
     function_tag: Optional[str] = "function_call"
     system_tag: Optional[str] = "system"
     mask_tag: Optional[str] = "mask"
+    audio_tag: Optional[str] = "audios"
 
     # document columns
     prefix: Optional[str] = "prefix_text"

@@ -2,8 +2,8 @@ import torch
 from torch import nn
 from abc import abstractmethod
 
-from mini.module.streaming import StreamingModule, State
-from mini.quantization.base import QuantizedResult
+from .module.streaming import StreamingModule, State
+from .quantization.base import QuantizedResult
 
 
 class CompressionModel(StreamingModule[State]):

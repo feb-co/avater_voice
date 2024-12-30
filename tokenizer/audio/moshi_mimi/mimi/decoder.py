@@ -2,10 +2,10 @@ import typing as tp
 import numpy as np
 from torch import nn
 
-from mini.module.streaming import StreamingContainer
-from mini.module.conv import StreamingConv1d, StreamingConvTranspose1d
-from mini.module.seanet_block import SEANetResnetBlock
-from mini.utils.compile import torch_compile_lazy
+from .module.streaming import StreamingContainer
+from .module.conv import StreamingConv1d, StreamingConvTranspose1d
+from .module.seanet_block import SEANetResnetBlock
+from .utils.compile import torch_compile_lazy
 
 
 class SEANetDecoder(StreamingContainer):

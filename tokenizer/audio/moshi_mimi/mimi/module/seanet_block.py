@@ -3,8 +3,8 @@ import typing as tp
 import numpy as np
 import torch.nn as nn
 
-from mini.module.conv import StreamingConv1d
-from mini.module.streaming import StreamingContainer, StreamingAdd
+from .conv import StreamingConv1d
+from .streaming import StreamingContainer, StreamingAdd
 
 
 

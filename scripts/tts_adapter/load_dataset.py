@@ -4,15 +4,18 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 from datasets import DatasetDict, load_dataset, load_from_disk
+from transformers import PreTrainedTokenizer, ProcessorMixin, Seq2SeqTrainingArguments
+from mimi import MimiTokenizer
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from scripts.tts_adapter.schema import DatasetAttr
+from scripts.tts_adapter.schema import Role
 
 
 def convert_avater_audio(
     example: Dict[str, Any],
     dataset_attr: "DatasetAttr",
-    data_args: "DataArguments",
+    data_args=None,
 ) -> Dict[str, Any]:
     r"""
     Converts sharegpt format dataset to the standard format.
@@ -47,42 +50,13 @@ def convert_avater_audio(
             broken_data = True
 
         aligned_messages.append(
-            {"role": tag_mapping[message[dataset_attr.role_tag].lower()], "content": message[dataset_attr.content_tag]}
+            {
+                "role": tag_mapping[message[dataset_attr.role_tag].lower()],
+                "content": message[dataset_attr.content_tag],
+                "audio": message[dataset_attr.audio_tag]
+            }
         )
 
-    if (not dataset_attr.ranking and len(aligned_messages) % 2 != 0) or (
-        dataset_attr.ranking and len(aligned_messages) % 2 == 0
-    ):
-        print(f"Invalid message count in {messages}.")
-        broken_data = True
-
-    if dataset_attr.kto_tag and isinstance(example[dataset_attr.kto_tag], bool):  # kto example
-        prompt = aligned_messages[:-1]
-        response = aligned_messages[-1:]
-        if example[dataset_attr.kto_tag]:
-            response = response + [{"role": Role.ASSISTANT.value, "content": ""}]
-        else:
-            response = [{"role": Role.ASSISTANT.value, "content": ""}] + response
-    elif (
-        dataset_attr.ranking
-        and isinstance(example[dataset_attr.chosen], dict)
-        and isinstance(example[dataset_attr.rejected], dict)
-    ):  # pairwise example
-        chosen = example[dataset_attr.chosen]
-        rejected = example[dataset_attr.rejected]
-        if (
-            chosen[dataset_attr.role_tag].lower() not in accept_tags[-1]
-            or rejected[dataset_attr.role_tag].lower() not in accept_tags[-1]
-        ):
-            print(f"Invalid role tag in {[chosen, rejected]}.")
-            broken_data = True
-
-        prompt = aligned_messages
-        response = [
-            {"role": tag_mapping[chosen[dataset_attr.role_tag].lower()], "content": chosen[dataset_attr.content_tag]},
-            {"role": tag_mapping[rejected[dataset_attr.role_tag].lower()], "content": rejected[dataset_attr.content_tag]},
-        ]
-    else:  # normal example
         prompt = aligned_messages[:-1]
         response = aligned_messages[-1:]
 
@@ -90,17 +64,60 @@ def convert_avater_audio(
         print("Skipping this abnormal example.")
         prompt, response = [], []
 
-    convert_images = partial(_convert_images, dataset_attr=dataset_attr, data_args=data_args)
-    convert_videos = partial(_convert_videos, dataset_attr=dataset_attr, data_args=data_args)
     output = {
         "_prompt": prompt,
         "_response": response,
         "_system": system,
         "_tools": example[dataset_attr.tools] if dataset_attr.tools else "",
-        "_images": convert_images(example[dataset_attr.images]) if dataset_attr.images else None,
-        "_videos": convert_videos(example[dataset_attr.videos]) if dataset_attr.videos else None,
+        "_images": None,
+        "_videos": None,
     }
     return output
+
+
+def _get_preprocessed_dataset(
+    dataset: Optional[Union["Dataset", "IterableDataset"]],
+    stage,
+    template: "Template",
+    tokenizer: Optional[Union["PreTrainedTokenizer", "MimiTokenizer"]],
+    is_eval: bool = False,
+) -> Optional[Union["Dataset", "IterableDataset"]]:
+    r"""
+    Preprocesses the dataset, including format checking and tokenization.
+    """
+    if dataset is None:
+        return None
+
+    preprocess_func = None
+    print_function = None
+
+    column_names = list(next(iter(dataset)).keys())
+    kwargs = {}
+    if not False:
+        kwargs = dict(
+            num_proc=16,
+            load_from_cache_file=(not False),
+            desc="Running tokenizer on dataset",
+        )
+
+    dataset = dataset.map(
+        preprocess_func,
+        batched=True,
+        remove_columns=column_names,
+        **kwargs,
+    )
+
+    if True:
+        try:
+            print(f"{stage} eval example:" if is_eval else f"{stage} training example:", flush=True)
+            print_function(next(iter(dataset)))
+        except StopIteration:
+            if stage == "pt":
+                raise RuntimeError("Cannot find sufficient samples, consider increasing dataset size.")
+            else:
+                raise RuntimeError("Cannot find valid samples, check `data/README.md` for the data format.")
+
+    return dataset
 
 
 def align_dataset(
@@ -116,14 +133,14 @@ def align_dataset(
         _images: [],
         _videos: [],
     """
-    convert_func = partial(convert_avater_audio, dataset_attr=dataset_attr, data_args=data_args)
+    convert_func = partial(convert_avater_audio, dataset_attr=dataset_attr, data_args=None)
 
     column_names = list(next(iter(dataset)).keys())
     kwargs = {}
-    if not data_args.streaming:
+    if not False:
         kwargs = dict(
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=(not data_args.overwrite_cache) or (training_args.local_process_index != 0),
+            num_proc=16,
+            load_from_cache_file=(not False),
             desc="Converting format of dataset",
         )
 
@@ -135,13 +152,15 @@ def align_dataset(
     )
 
 
-def load_single_dataset(data_files):
+def load_single_dataset(data_files, tokenizer_dir):
     dataset_attr = DatasetAttr(
         load_from="file",
         dataset_name="tts_adapter",
         stage="audio_tts",
         formatting="avater_audio"
     )
+    
+    tokenizer = MimiTokenizer.load_from_checkpoint(cpt_dir=tokenizer_dir)
 
     dataset = load_dataset(
         path="json",
@@ -156,9 +175,16 @@ def load_single_dataset(data_files):
         trust_remote_code=False,
     )
 
-    return align_dataset(dataset, dataset_attr)
+    dataset = align_dataset(dataset, dataset_attr)
+
+    dataset = _get_preprocessed_dataset(
+        dataset, stage=dataset_attr.stage, template=None, tokenizer=tokenizer
+    )
+
+    return dataset
 
 
 if __name__ == "__main__":
     audio_file = sys.argv[1]
-    dataset = load_single_dataset([audio_file])
+    tokenizer_dir = sys.argv[2]
+    dataset = load_single_dataset([audio_file], tokenizer_dir)

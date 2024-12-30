@@ -31,7 +31,7 @@ pip install -e .
 
 ```python
 from audiotools import AudioSignal
-from mimi.model import MimiTokenizer
+from mimi import MimiTokenizer
 
 def inference_mimi(wav_file, outfile):
     """

@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_model
 
-from mini.base import CompressionModel
-from mini.utils.compile import no_compile, CUDAGraphed
-from mini.module.transformer import ProjectedTransformer
-from mini.module.resample import ConvDownsample1d, ConvTrUpsample1d
-from mini.encoder import SEANetEncoder
-from mini.decoder import SEANetDecoder
-from mini.quantization import SplitResidualVectorQuantizer, QuantizedResult, ResidualVectorQuantizer
+from .base import CompressionModel
+from .utils.compile import no_compile, CUDAGraphed
+from .module.transformer import ProjectedTransformer
+from .module.resample import ConvDownsample1d, ConvTrUpsample1d
+from .encoder import SEANetEncoder
+from .decoder import SEANetDecoder
+from .quantization import SplitResidualVectorQuantizer, QuantizedResult, ResidualVectorQuantizer
 
 
 MIMI_NAME = 'tokenizer-e351c8d8-checkpoint125.safetensors'

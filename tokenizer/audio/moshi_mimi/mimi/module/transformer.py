@@ -18,10 +18,10 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from mini.utils.compile import no_compile
-from mini.module.gating import make_gating
-from mini.module.rope import RotaryEmbedding
-from mini.module.streaming import StreamingModule, StreamingContainer
+from ..utils.compile import no_compile
+from .gating import make_gating
+from .rope import RotaryEmbedding
+from .streaming import StreamingModule, StreamingContainer
 
 
 class LayerNormF32(nn.LayerNorm):

@@ -18,7 +18,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import weight_norm
 
-from mini.module.streaming import RawStreamingConv1d, RawStreamingConvTranspose1d, StreamingModule
+from .streaming import RawStreamingConv1d, RawStreamingConvTranspose1d, StreamingModule
 
 
 CONV_NORMALIZATIONS = frozenset(["none", "weight_norm"])
