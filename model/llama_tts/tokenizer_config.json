@@ -1,0 +1,21 @@
+{
+  "name_or_path": "avater-tokenizer",
+  "add_prefix_space": false,
+  "tokenizer_class": "AvaterTokenizer",
+  "use_fast": false,
+  "text_tokenizer_path": "/mnt/ceph/huggingface/Llama-3.1-8B",
+  "audio_special_token": {
+    "bos_token": 16384,
+    "eos_token": 16385,
+    "short_wait_token": 16386,
+    "long_wait_token": 16387
+  },
+  "short_wait_string": "<|SHORT_WAIT|>",
+  "long_wait_string": "<|LONG_WAIT|>",
+  "auto_map": {
+    "AutoTokenizer": [
+      "tokenization_avater.AvaterTokenizer",
+      null
+      ]
+  }
+}

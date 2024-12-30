@@ -6,7 +6,7 @@
       "AutoConfig": "configuration_llama_tts.LlamaTTSConfig",
       "AutoModel": "modeling_llama_tts.LlamaTTS"
     },
-    "audio_vocab_size": 16392,
+    "audio_special_tokens": 8,
     "code_size": 2048,
     "code_layers": 8,
     "tts_adapter_hidden_layers": 6,
