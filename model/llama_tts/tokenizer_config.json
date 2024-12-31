@@ -13,7 +13,7 @@
   "short_wait_string": "<|SHORT_WAIT|>",
   "long_wait_string": "<|LONG_WAIT|>",
   "audio_tokenizer": "moshi_mimi",
-  "asr_tokenizer": "whisper",
+  "cpt_cache": ".cache/",
   "auto_map": {
     "AutoTokenizer": [
       "tokenization_avater.AvaterTokenizer",
