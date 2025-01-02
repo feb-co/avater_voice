@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union, Tuple
 
@@ -7,8 +8,11 @@ from datasets import DatasetDict, load_dataset, load_from_disk
 from transformers import PreTrainedTokenizer, ProcessorMixin, AutoTokenizer
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from scripts.tts_adapter.schema import DatasetAttr
-from scripts.tts_adapter.schema import Role
+from scripts.dataset import DataArguments, DatasetAttr, Role, TemplateFeb, get_template_and_fix_tokenizer
+
+IGNORE_INDEX = 0
+
+logger = logging.get_logger(__name__)
 
 
 def convert_avater_audio(
@@ -74,12 +78,12 @@ def convert_avater_audio(
     return output
 
 
-def _encode_conversation_example(
+def _encode_avater_audio_example(
     prompt: Sequence[Dict[str, str]],
     response: Sequence[Dict[str, str]],
     system: Optional[str],
     tools: Optional[str],
-    template: "Template",
+    template: "TemplateFeb",
     tokenizer: "PreTrainedTokenizer",
     processor: Optional["ProcessorMixin"],
     train_on_prompt: bool,
@@ -90,18 +94,11 @@ def _encode_conversation_example(
     ):  # llava-like models
         prompt[0]["content"] = template.image_token + prompt[0]["content"]
 
-    messages = prompt + response
-    input_ids, labels = [], []
-
-    if processor is not None and hasattr(
-        processor, "image_seq_length"
-    ):  # paligemma models
-        image_token_id = tokenizer.convert_tokens_to_ids(template.image_token)
-        input_ids += [image_token_id] * getattr(processor, "image_seq_length")
-        labels += [IGNORE_INDEX] * getattr(processor, "image_seq_length")
+    prompt_input_ids, response_input_ids, labels = [], []
+    audio_input_ids, audio_labels = [], []
 
     prefix_ids = template.encode_system(tokenizer=tokenizer, system=system, tools=tools)
-    encoded_pairs = template.encode_multiturn(tokenizer=tokenizer, messages=messages, system=None, tools=None)
+    prompt_pairs, reponse_pairs = template.encode_avater_audio(tokenizer=tokenizer, prompt_messages=prompt, response_messages=response)
     text_pairs = [(messages[i], messages[i + 1]) for i in range(0, len(messages), 2)]
     for turn_idx, (source_ids, target_ids) in enumerate(encoded_pairs):
         source_len = len(source_ids)
@@ -129,12 +126,13 @@ def _encode_conversation_example(
         labels += [tokenizer.eos_token_id]
 
     assert len(input_ids) == len(labels), "The length of input_ids should equal with labels' length!"
+
     return prefix_ids, input_ids, labels
 
 
-def preprocess_conversation_dataset(
+def preprocess_avater_audio_dataset(
     examples: Dict[str, List[Any]],
-    template: "Template",
+    template: "TemplateFeb",
     tokenizer: "PreTrainedTokenizer",
     processor: Optional["ProcessorMixin"],
     data_args: "DataArguments",
@@ -149,7 +147,7 @@ def preprocess_conversation_dataset(
             )
             continue
 
-        system_ids, input_ids, labels = _encode_conversation_example(
+        system_ids, input_ids, labels = _encode_avater_audio_example(
             prompt=examples["_prompt"][i],
             response=examples["_response"][i],
             system=examples["_system"][i],
@@ -171,8 +169,9 @@ def preprocess_conversation_dataset(
 
 def _get_preprocessed_dataset(
     dataset: Optional[Union["Dataset", "IterableDataset"]],
+    data_args: "DataArguments",
     stage,
-    template: "Template",
+    template: "TemplateFeb",
     tokenizer: Optional[Union["PreTrainedTokenizer", "MimiTokenizer"]],
     is_eval: bool = False,
 ) -> Optional[Union["Dataset", "IterableDataset"]]:
@@ -182,7 +181,13 @@ def _get_preprocessed_dataset(
     if dataset is None:
         return None
 
-    preprocess_func = None
+    preprocess_func = partial(
+        preprocess_avater_audio_dataset,
+        template=template,
+        tokenizer=tokenizer,
+        processor=None,
+        data_args=data_args,
+    )
     print_function = None
 
     column_names = list(next(iter(dataset)).keys())
@@ -253,7 +258,10 @@ def load_single_dataset(data_files, tokenizer_dir):
         stage="audio_tts",
         formatting="avater_audio"
     )
-    
+    data_args = DataArguments(
+        template="llama3"
+    )
+
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_dir,
         use_fast=False,
@@ -261,7 +269,10 @@ def load_single_dataset(data_files, tokenizer_dir):
         padding_side="right",
         trust_remote_code=True
     )
+    
+    template = get_template_and_fix_tokenizer(tokenizer, data_args)
 
+    ##################################
     dataset = load_dataset(
         path="json",
         name=None,
@@ -278,7 +289,7 @@ def load_single_dataset(data_files, tokenizer_dir):
     dataset = align_dataset(dataset, dataset_attr)
 
     dataset = _get_preprocessed_dataset(
-        dataset, stage=dataset_attr.stage, template=None, tokenizer=tokenizer
+        dataset, stage=dataset_attr.stage, template=template, tokenizer=tokenizer
     )
 
     return dataset
