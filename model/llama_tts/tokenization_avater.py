@@ -27,7 +27,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
         long_wait_string="<|LONG_WAIT|>",
         audio_tokenizer="moshi_mimi",
         cpt_cache=".cache/",
-        device="cpu"
+        device="cpu",
         **kwargs
     ):
         if not os.path.isdir(text_tokenizer_path):
