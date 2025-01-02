@@ -158,7 +158,7 @@ class TemplateFeb:
                 if message["content"]:
                     elements += self.format_user.apply(content=message["content"], idx=str(i // 2))
                 elif message["audios"]:
-                    elements += self.format_user.apply(content=json.dumps(message["audios"], ensure_ascii=False), idx=str(i // 2))
+                    elements += self.format_user_audio.apply(content=json.dumps(message["audios"], ensure_ascii=False), idx=str(i // 2))
                 else:
                     raise AssertionError
             elif message["role"] == Role.ASSISTANT.value:
@@ -166,9 +166,11 @@ class TemplateFeb:
             else:
                 raise NotImplementedError("Unexpected role: {}".format(message["role"]))
 
-            prompt_pairs.append(self._convert_elements_to_ids(tokenizer, elements))
+            prompt_pairs.append(self._convert_elements_to_ids(tokenizer, elements, return_dict=True))
+        
+        prompt_pairs = [(prompt_pairs[i], prompt_pairs[i + 1]) for i in range(0, len(prompt_pairs), 2)]
 
-        return [(encoded_messages[i], encoded_messages[i + 1]) for i in range(0, len(encoded_messages), 2)]
+        return prompt_pairs
 
     def _encode(
         self,
@@ -213,26 +215,47 @@ class TemplateFeb:
 
         return encoded_messages
 
-    def _convert_elements_to_ids(self, tokenizer: "PreTrainedTokenizer", elements: "SLOTS") -> List[int]:
+    def _convert_elements_to_ids(self, tokenizer: "PreTrainedTokenizer", elements: "SLOTS", return_dict=False) -> List[int]:
         r"""
         Converts elements to token ids.
         """
+        bos_token_id = tokenizer.bos_token_id if getattr(tokenizer, "bos_token_id", None) else tokenizer.text_tokenizer.bos_token_id
+        eos_token_id = tokenizer.eos_token_id if getattr(tokenizer, "eos_token_id", None) else tokenizer.text_tokenizer.eos_token_id
+
         token_ids = []
-        for elem in elements:
+        audio_features = []
+        audio_pos = []
+        for idx, elem in enumerate(elements):
             if isinstance(elem, str):
                 if len(elem) != 0:
-                    token_ids += tokenizer.encode(elem, add_special_tokens=False)
+                    if idx>0 and isinstance(elements[idx], dict) and self.format_user_audio.slots[0].get("token") == elements[idx].get("token"):
+                        sub_token_ids, sub_audio_features, sub_audio_pos = tokenizer.encode_whisper_features(elem)
+                        for start_index, length in sub_audio_pos:
+                            audio_pos.append([len(token_ids)+start_index, length])
+                        token_ids += sub_token_ids
+                        audio_features += sub_audio_features
+                    else:
+                        token_ids += tokenizer.encode(elem, add_special_tokens=False)
             elif isinstance(elem, dict):
                 token_ids += [tokenizer.convert_tokens_to_ids(elem.get("token"))]
             elif isinstance(elem, set):
-                if "bos_token" in elem and tokenizer.bos_token_id is not None:
-                    token_ids += [tokenizer.bos_token_id]
-                elif "eos_token" in elem and tokenizer.eos_token_id is not None:
-                    token_ids += [tokenizer.eos_token_id]
+                if "bos_token" in elem and bos_token_id is not None:
+                    token_ids += [bos_token_id]
+                elif "eos_token" in elem and eos_token_id is not None:
+                    token_ids += [eos_token_id]
             else:
                 raise ValueError(f"Input must be string, set[str] or dict[str, str], got {type(elem)}")
 
-        return token_ids
+        if return_dict:
+            if audio_features:
+                return {"token_ids": token_ids, "audio_features": audio_features, "audio_pos": audio_pos}
+            else:
+                return {"token_ids": token_ids}
+        else:
+            if audio_features:
+                return (token_ids, audio_features, audio_pos)
+            else:
+                return token_ids
 
 
 @dataclass

@@ -1,5 +1,5 @@
 import os
-import re
+import json
 import torch
 import whisper
 from audiotools import AudioSignal
@@ -10,7 +10,7 @@ from transformers.utils import logging
 from transformers import AutoTokenizer
 
 
-def load_user_audio(path):
+def load_whisper_audio(path):
     audio = whisper.load_audio(path)
     duration_ms = (len(audio) / 16000) * 1000
     audio = whisper.pad_or_trim(audio)
@@ -27,6 +27,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
         long_wait_string="<|LONG_WAIT|>",
         audio_tokenizer="moshi_mimi",
         cpt_cache=".cache/",
+        device="cpu"
         **kwargs
     ):
         if not os.path.isdir(text_tokenizer_path):
@@ -45,12 +46,12 @@ class AvaterTokenizer(PreTrainedTokenizer):
 
         # tokenizer init
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
-
+        self.whisper_tokenizer = whisper.load_model("small").to(device)
         if audio_tokenizer == "moshi_mimi":
             from mimi import MimiTokenizer
             self.audio_tokenizer = MimiTokenizer.load_from_checkpoint(
                 cpt_dir=cpt_cache,
-                device="cpu"
+                device=device
             )
         else:
             raise NotImplementedError
@@ -61,7 +62,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
         audio_signal: Optional[Union[List[Dict], AudioSignal]]=None,
         add_special_tokens=True,
         **kwargs
-    ) -> Tuple[List, List]:
+    ) -> Union[Tuple[List, List], List]:
         text_token_ids = self.text_tokenizer.encode(
             text=text,
             add_special_tokens=add_special_tokens,
@@ -95,7 +96,28 @@ class AvaterTokenizer(PreTrainedTokenizer):
                     codes = self.audio_tokenizer.encode(audio_signal.audio_data)
                     for idx in range(len(codes)):
                         codes[idx] = codes[idx].to_list()
+            
+            return (text_token_ids, codes)
         else:
-            codes = None
+            return text_token_ids
 
-        return (text_token_ids, codes)
+    def encode_whisper_features(self, elem):
+        if not isinstance(elem, dict):
+            audio_signal = json.loads(elem)
+
+        token_ids = []
+        audio_features = None
+        audio_pos = []
+        for signal in audio_signal:
+            if signal["split"]:
+                token_ids += self.text_tokenizer.encode(signal["split"], add_special_tokens=False)
+
+            mel, leng = load_whisper_audio(signal["file"])
+            audio_pos.append([len(token_ids), leng])
+            token_ids += [self.text_tokenizer.eos_token_id] * leng
+            if not audio_features:
+                audio_features = self.whisper_tokenizer.embed_audio(mel)[0][:leng]
+            else:
+                audio_features = torch.cat([audio_features, self.whisper_tokenizer.embed_audio(mel)[0][:leng]], dim=0)
+
+        return token_ids, audio_features, audio_pos
