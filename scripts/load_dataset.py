@@ -94,40 +94,52 @@ def _encode_avater_audio_example(
     ):  # llava-like models
         prompt[0]["content"] = template.image_token + prompt[0]["content"]
 
-    prompt_input_ids, response_input_ids, labels = [], []
-    audio_input_ids, audio_labels = [], []
+    messages = prompt + response
+
+    text_input_ids, text_labels = [], []
+    audio_features, audio_pos = [], []
+    audio_codes_ids, audio_codes_labels = [], []
 
     prefix_ids = template.encode_system(tokenizer=tokenizer, system=system, tools=tools)
-    prompt_pairs, reponse_pairs = template.encode_avater_audio(tokenizer=tokenizer, prompt_messages=prompt, response_messages=response)
+    encoded_pairs = template.encode_avater_audio(tokenizer=tokenizer, prompt_messages=prompt, response_message=response)
     text_pairs = [(messages[i], messages[i + 1]) for i in range(0, len(messages), 2)]
-    for turn_idx, (source_ids, target_ids) in enumerate(encoded_pairs):
-        source_len = len(source_ids)
-        target_len = len(target_ids)
+    for turn_idx, (source_dict, target_dict) in enumerate(encoded_pairs):
+        # text
+        source_token_ids = source_dict["token_ids"]
+        target_token_ids = target_dict["token_ids"]
 
-        if train_on_prompt:
-            source_label = source_ids
-        elif turn_idx != 0 and template.efficient_eos:
-            source_label = [tokenizer.eos_token_id] + [IGNORE_INDEX] * (source_len - 1)
-        else:
-            source_label = [IGNORE_INDEX] * source_len
+        source_text_len = len(source_token_ids)
+        target_text_len = len(target_token_ids)
+
+        source_text_label = [IGNORE_INDEX] * source_text_len
 
         if mask_history and turn_idx != len(encoded_pairs) - 1:
-            target_label = [IGNORE_INDEX] * target_len
+            target_text_label = [IGNORE_INDEX] * target_text_len
         elif text_pairs[turn_idx][1]["role"] == Role.MASK.value:
-            target_label = [IGNORE_INDEX] * target_len
+            target_text_label = [IGNORE_INDEX] * target_text_len
         else:
-            target_label = target_ids
+            target_text_label = target_token_ids
 
-        input_ids += source_ids + target_ids
-        labels += source_label + target_label
+        text_input_ids += source_token_ids + target_token_ids
+        text_labels += source_text_label + target_text_label
 
-    if template.efficient_eos:
-        input_ids += [tokenizer.eos_token_id]
-        labels += [tokenizer.eos_token_id]
+        # audio
+        if "audio_features" in source_dict:
+            audio_features += source_dict["audio_features"]
+            audio_pos += source_dict["audio_pos"]
+        
+        if "audio_codes" in target_dict:
+            audio_codes_ids += target_dict["audio_codes"]
+            audio_codes_labels += target_dict["audio_codes"]
 
-    assert len(input_ids) == len(labels), "The length of input_ids should equal with labels' length!"
-
-    return prefix_ids, input_ids, labels
+    assert len(text_input_ids) == len(text_labels), "The length of text_input_ids should equal with labels' length!"
+    assert len(audio_codes_ids) == len(audio_codes_labels), "The length of audio_codes_ids should equal with labels' length!"
+    return {
+        "prefix_ids": prefix_ids,
+        "text_input_ids": text_input_ids, "text_labels": text_labels,
+        "audio_features": audio_features, "audio_pos": audio_pos,
+        "audio_codes_ids": audio_codes_ids, "audio_codes_labels": audio_codes_labels
+    }
 
 
 def preprocess_avater_audio_dataset(
@@ -147,7 +159,7 @@ def preprocess_avater_audio_dataset(
             )
             continue
 
-        system_ids, input_ids, labels = _encode_avater_audio_example(
+        enocde_outputs: dict = _encode_avater_audio_example(
             prompt=examples["_prompt"][i],
             response=examples["_response"][i],
             system=examples["_system"][i],
@@ -158,6 +170,7 @@ def preprocess_avater_audio_dataset(
             train_on_prompt=data_args.train_on_prompt,
             mask_history=data_args.mask_history,
         )
+
         model_inputs["input_ids"].append(system_ids + input_ids)
         model_inputs["attention_mask"].append([1] * (len(system_ids) + len(input_ids)))
         model_inputs["labels"].append([IGNORE_INDEX] * len(system_ids) + labels)

@@ -131,8 +131,8 @@ class TemplateFeb:
         self,
         tokenizer: "PreTrainedTokenizer",
         prompt_messages: Sequence[Dict[str, str]],
-        response_messages: Sequence[Dict[str, str]],
-    ) -> List[Tuple[List[int], List[int]]]:
+        response_message: Dict[str, str],
+    ) -> List[Tuple[Dict, Dict]]:
         r"""
         Returns multiple pairs of token ids representing prompts and responses respectively.
         """
@@ -167,10 +167,21 @@ class TemplateFeb:
                 raise NotImplementedError("Unexpected role: {}".format(message["role"]))
 
             prompt_pairs.append(self._convert_elements_to_ids(tokenizer, elements, return_dict=True))
-        
-        prompt_pairs = [(prompt_pairs[i], prompt_pairs[i + 1]) for i in range(0, len(prompt_pairs), 2)]
 
-        return prompt_pairs
+        if response_message["role"] == Role.ASSISTANT.value:
+            text_element = self.format_assistant.apply(content=response_message["content"])[0]
+            audio_element = response_message["audios"]
+            response_encode = tokenizer.encode(text=text_element, audio_signal=audio_element, add_special_tokens=False)
+            if isinstance(response_encode, tuple):
+                audio_codes = [tokenizer.audio_special_token["bos_token"]] + response_encode[1] + [tokenizer.audio_special_token["eos_token"]]
+                response = {"token_ids": response_encode[0], "audio_codes": audio_codes}
+            else:
+                response = {"token_ids": response_encode}
+        else:
+            raise NotImplementedError("Unexpected role for repsonse: {}".format(response_message["role"]))
+
+        encoded_messages = prompt_pairs + [response]
+        return [(encoded_messages[i], encoded_messages[i + 1]) for i in range(0, len(encoded_messages), 2)]
 
     def _encode(
         self,

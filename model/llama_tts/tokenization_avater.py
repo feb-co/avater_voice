@@ -81,7 +81,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
                         else:
                             split_token = None
 
-                        sub_codes = self.audio_tokenizer.encode(signal["signal"].audio_data)
+                        sub_codes = self.audio_tokenizer.encode(signal["signal"].audio_data if "signal" in signal else AudioSignal(signal["file"]).audio_data)
                         for idx, sub_code in enumerate(sub_codes):
                             code_list: list = sub_code.to_list()
                             
@@ -96,7 +96,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
                     codes = self.audio_tokenizer.encode(audio_signal.audio_data)
                     for idx in range(len(codes)):
                         codes[idx] = codes[idx].to_list()
-            
+
             return (text_token_ids, codes)
         else:
             return text_token_ids
