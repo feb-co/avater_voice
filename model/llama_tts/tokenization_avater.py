@@ -53,20 +53,34 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 cpt_dir=cpt_cache,
                 device=device
             )
+            self.audio_duration_token = 13
+            self.text_duration_token = 4
         else:
             raise NotImplementedError
+
+    def __repr__(self) -> str:
+        added_tokens_decoder_rep = "\n\t".join([f"{k}: {v.__repr__()}," for k, v in self.text_tokenizer.added_tokens_decoder.items()])
+        return (
+            f"{self.__class__.__name__}(name_or_path='{self.text_tokenizer.name_or_path}',"
+            f" vocab_size={self.text_tokenizer.vocab_size}, model_max_length={self.text_tokenizer.model_max_length}, is_fast={self.text_tokenizer.is_fast},"
+            f" padding_side='{self.text_tokenizer.padding_side}', truncation_side='{self.text_tokenizer.truncation_side}',"
+            f" special_tokens={self.text_tokenizer.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
+            " added_tokens_decoder={\n\t" + added_tokens_decoder_rep + "\n}\n)"
+        )
 
     def encode(
         self,
         text: str,
         audio_signal: Optional[Union[List[Dict], AudioSignal]]=None,
         add_special_tokens=True,
+        add_audio_special_tokens=True,
+        acoustic_delay: int=1,
         **kwargs
     ) -> Union[Tuple[List, List], List]:
         text_token_ids = self.text_tokenizer.encode(
             text=text,
             add_special_tokens=add_special_tokens,
-            kwargs=kwargs
+            **kwargs
         )
 
         if audio_signal:
@@ -81,21 +95,35 @@ class AvaterTokenizer(PreTrainedTokenizer):
                         else:
                             split_token = None
 
-                        sub_codes = self.audio_tokenizer.encode(signal["signal"].audio_data if "signal" in signal else AudioSignal(signal["file"]).audio_data)
+                        sub_codes = self.audio_tokenizer.encode(signal["signal"].audio_data if "signal" in signal else AudioSignal(signal["file"]).audio_data)[0]
                         for idx, sub_code in enumerate(sub_codes):
-                            code_list: list = sub_code.to_list()
-                            
+                            code_list: list = sub_code.tolist()
+
                             if split_token:
                                 code_list = code_list.insert(0, split_token)
 
-                            if len(codes) != sub_codes:
+                            if len(codes) != len(sub_codes):
                                 codes.append(code_list)
                             else:
                                 codes[idx] += code_list
-                else:
-                    codes = self.audio_tokenizer.encode(audio_signal.audio_data)
+
                     for idx in range(len(codes)):
-                        codes[idx] = codes[idx].to_list()
+                        pad_tokens = [self.audio_special_token["pad_token"]] * acoustic_delay
+                        if add_audio_special_tokens:
+                            if idx == 0:
+                                codes[idx] = [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]] + pad_tokens
+                            else:
+                                codes[idx] = pad_tokens + [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]]
+                else:
+                    codes = self.audio_tokenizer.encode(audio_signal.audio_data)[0]
+                    for idx in range(len(codes)):
+                        pad_tokens = [self.audio_special_token["pad_token"]] * acoustic_delay
+                        codes[idx] = codes[idx].tolist()
+                        if add_audio_special_tokens:
+                            if idx == 0:
+                                codes[idx] = [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]] + pad_tokens
+                            else:
+                                codes[idx] = pad_tokens + [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]]
 
             return (text_token_ids, codes)
         else:
@@ -121,3 +149,21 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 audio_features = torch.cat([audio_features, self.whisper_tokenizer.embed_audio(mel)[0][:leng]], dim=0)
 
         return token_ids, audio_features, audio_pos
+
+    def convert_t2a_attention_mask(self, text_tokens: list[int], audio_tokens: list):
+        audio_length = len(audio_tokens[0])
+        text_length = len(text_tokens)
+
+        attention_mask = [[0 for _ in range(text_length)] for _ in range(audio_length)]
+        text_token_threshold = 0
+        for audio_idx in range(audio_length):
+            if audio_idx % self.audio_duration_token == 0:
+                text_token_threshold += self.text_duration_token
+            text_token_threshold = self.get_complete_phrase(text_tokens, text_token_threshold)
+            print(audio_idx, text_token_threshold, "---", flush=True)
+
+        assert text_token_threshold >= text_length, "audio_tokens need cover text_tokens!"
+        return attention_mask
+
+    def get_complete_phrase(self, text_tokens: list[int], text_token_threshold: int):
+        pass

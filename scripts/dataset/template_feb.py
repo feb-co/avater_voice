@@ -19,8 +19,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple, Union
 from transformers.utils.versions import require_version
 from typing_extensions import override
 
-# from ..extras import logging
-import logging
+from ..extras import logging
 from .data_role import Role
 from .formatter import EmptyFormatter, FunctionFormatter, StringFormatter, ToolFormatter
 from .mm_plugin import get_mm_plugin
@@ -155,9 +154,9 @@ class TemplateFeb:
                 elements += self.format_separator.apply()
 
             if message["role"] == Role.USER.value:
-                if message["content"]:
+                if message["content"] is not None:
                     elements += self.format_user.apply(content=message["content"], idx=str(i // 2))
-                elif message["audios"]:
+                elif message["audios"] is not None:
                     elements += self.format_user_audio.apply(content=json.dumps(message["audios"], ensure_ascii=False), idx=str(i // 2))
                 else:
                     raise AssertionError
@@ -173,8 +172,7 @@ class TemplateFeb:
             audio_element = response_message["audios"]
             response_encode = tokenizer.encode(text=text_element, audio_signal=audio_element, add_special_tokens=False)
             if isinstance(response_encode, tuple):
-                audio_codes = [tokenizer.audio_special_token["bos_token"]] + response_encode[1] + [tokenizer.audio_special_token["eos_token"]]
-                response = {"token_ids": response_encode[0], "audio_codes": audio_codes}
+                response = {"token_ids": response_encode[0], "audio_codes": response_encode[1]}
             else:
                 response = {"token_ids": response_encode}
         else:
@@ -364,7 +362,7 @@ def _register_template(
     )
     ```
     """
-    template_class = Llama2Template if any(k in name for k in ("llama2", "mistral")) else Template
+    template_class = Llama2Template if any(k in name for k in ("llama2", "mistral")) else TemplateFeb
     default_slots = ["{{content}}"] if efficient_eos else ["{{content}}", {"eos_token"}]
     default_user_formatter = StringFormatter(slots=["{{content}}"])
     default_assistant_formatter = StringFormatter(slots=default_slots)
@@ -473,7 +471,7 @@ def _get_jinja_template(template: "TemplateFeb", tokenizer: "PreTrainedTokenizer
     return jinja_template
 
 
-def get_template_and_fix_tokenizer(tokenizer: "PreTrainedTokenizer", data_args: "DataArguments") -> "TemplateFeb":
+def get_template_and_fix_tokenizer(tokenizer: "PreTrainedTokenizer", data_args: "DataArguments", is_avater_tokenizer=False) -> "TemplateFeb":
     r"""
     Gets chat template and fixes the tokenizer.
     """
@@ -504,26 +502,46 @@ def get_template_and_fix_tokenizer(tokenizer: "PreTrainedTokenizer", data_args: 
         _add_or_replace_eos_token(tokenizer, eos_token=stop_words[0])
         stop_words = stop_words[1:]
 
-    if tokenizer.eos_token_id is None:
-        _add_or_replace_eos_token(tokenizer, eos_token="<|endoftext|>")
+    if not is_avater_tokenizer:
+        if tokenizer.eos_token_id is None:
+            _add_or_replace_eos_token(tokenizer, eos_token="<|endoftext|>")
 
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        logger.info_rank0(f"Add pad token: {tokenizer.pad_token}")
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            logger.info_rank0(f"Add pad token: {tokenizer.pad_token}")
+    else:
+        if tokenizer.text_tokenizer.eos_token_id is None:
+            _add_or_replace_eos_token(tokenizer, eos_token="<|endoftext|>")
+
+        if tokenizer.text_tokenizer.pad_token_id is None:
+            tokenizer.text_tokenizer.pad_token = tokenizer.text_tokenizer.eos_token
+            logger.info_rank0(f"Add text tokenizer pad token: {tokenizer.text_tokenizer.pad_token}")
 
     if stop_words:
-        num_added_tokens = tokenizer.add_special_tokens(
-            dict(additional_special_tokens=stop_words), replace_additional_special_tokens=False
-        )
+        if not is_avater_tokenizer:
+            num_added_tokens = tokenizer.add_special_tokens(
+                dict(additional_special_tokens=stop_words), replace_additional_special_tokens=False
+            )
+        else:
+            num_added_tokens = tokenizer.text_tokenizer.add_special_tokens(
+                dict(additional_special_tokens=stop_words), replace_additional_special_tokens=False
+            )
         logger.info_rank0("Add {} to stop words.".format(",".join(stop_words)))
         if num_added_tokens > 0:
             logger.warning_rank0("New tokens have been added, make sure `resize_vocab` is True.")
 
-    if tokenizer.chat_template is None or template.replace_jinja_template:
-        try:
-            tokenizer.chat_template = _get_jinja_template(template, tokenizer)
-        except ValueError as e:
-            logger.info_rank0(f"Cannot add this chat template to tokenizer: {e}.")
+    if not is_avater_tokenizer:
+        if tokenizer.chat_template is None or template.replace_jinja_template:
+            try:
+                tokenizer.chat_template = _get_jinja_template(template, tokenizer)
+            except ValueError as e:
+                logger.info_rank0(f"Cannot add this chat template to tokenizer: {e}.")
+    else:
+        if tokenizer.text_tokenizer.chat_template is None or template.replace_jinja_template:
+            try:
+                tokenizer.text_tokenizer.chat_template = _get_jinja_template(template, tokenizer.text_tokenizer)
+            except ValueError as e:
+                logger.info_rank0(f"Cannot add this chat template to tokenizer: {e}.")
 
     return template
 

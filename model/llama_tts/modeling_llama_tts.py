@@ -758,9 +758,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             )
 
         if encoder_hidden_states is not None and encoder_attention_mask is not None:
-            if self._use_flash_attention_2:
-                encoder_attention_mask = encoder_attention_mask if 0 in encoder_attention_mask else None
-            elif self._use_sdpa and not output_attentions and len(encoder_attention_mask.size())==2:
+            if self._use_sdpa and not output_attentions and len(encoder_attention_mask.size())==2:
                 # output_attentions=True can not be supported when using SDPA, and we fall back on
                 # the manual implementation that requires a 4D causal mask in all cases.
                 # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
@@ -788,7 +786,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
 
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: List[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.LongTensor] = None,
@@ -817,7 +815,10 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             use_cache = False
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = []
+            for i in range(len(input_ids)):
+                inputs_embeds.append(self.embed_tokens(input_ids[i]))
+            inputs_embeds = sum(inputs_embeds)/len(input_ids)
 
         # expand cache
         return_legacy_cache = False
@@ -943,7 +944,7 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
-        
+
         # frozen llm
         for name, param in self.llm.named_parameters():
             param.requires_grad_(False)
@@ -988,7 +989,7 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
         encoder_outputs: Optional[List[torch.FloatTensor]] = None,
         encoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
+        decoder_input_ids: List[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.LongTensor] = None,
         encoder_decoder_attention_mask: Optional[torch.LongTensor] = None,
         decoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,

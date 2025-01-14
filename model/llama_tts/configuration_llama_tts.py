@@ -26,7 +26,7 @@ class LlamaTTSConfig(LlamaConfig):
         **kwargs,
     ):
         self.audio_special_tokens = audio_special_tokens
-        self.audio_vocab_size = (code_size + audio_special_tokens) * code_layers
+        self.audio_vocab_size = (code_size + audio_special_tokens) * code_layers + 1
         self.code_size = code_size
         self.code_layers = code_layers
         self.tts_adapter_hidden_layers = tts_adapter_hidden_layers

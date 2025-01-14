@@ -4,21 +4,21 @@ import logging
 from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union, Tuple
 
-from datasets import DatasetDict, load_dataset, load_from_disk
+from datasets import Dataset, load_dataset, IterableDataset
 from transformers import PreTrainedTokenizer, ProcessorMixin, AutoTokenizer
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.dataset import DataArguments, DatasetAttr, Role, TemplateFeb, get_template_and_fix_tokenizer
 
 IGNORE_INDEX = 0
 
-logger = logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def convert_avater_audio(
     example: Dict[str, Any],
     dataset_attr: "DatasetAttr",
-    data_args=None,
+    data_args: "DataArguments",
 ) -> Dict[str, Any]:
     r"""
     Converts sharegpt format dataset to the standard format.
@@ -56,7 +56,16 @@ def convert_avater_audio(
             {
                 "role": tag_mapping[message[dataset_attr.role_tag].lower()],
                 "content": message[dataset_attr.content_tag],
-                "audio": message[dataset_attr.audio_tag]
+                "audios": [
+                    {
+                        "id": item["id"],
+                        "file": data_args.dataset_dir + "/" + item["file"],
+                        "split": item["split"],
+                    }
+                    if "file" in item else
+                    item
+                    for item in message[dataset_attr.audio_tag]
+                ]
             }
         )
 
@@ -99,9 +108,10 @@ def _encode_avater_audio_example(
     text_input_ids, text_labels = [], []
     audio_features, audio_pos = [], []
     audio_codes_ids, audio_codes_labels = [], []
+    t2a_attention_mask = []
 
     prefix_ids = template.encode_system(tokenizer=tokenizer, system=system, tools=tools)
-    encoded_pairs = template.encode_avater_audio(tokenizer=tokenizer, prompt_messages=prompt, response_message=response)
+    encoded_pairs = template.encode_avater_audio(tokenizer=tokenizer, prompt_messages=prompt, response_message=response[-1])
     text_pairs = [(messages[i], messages[i + 1]) for i in range(0, len(messages), 2)]
     for turn_idx, (source_dict, target_dict) in enumerate(encoded_pairs):
         # text
@@ -113,7 +123,7 @@ def _encode_avater_audio_example(
 
         source_text_label = [IGNORE_INDEX] * source_text_len
 
-        if mask_history and turn_idx != len(encoded_pairs) - 1:
+        if turn_idx != len(encoded_pairs) - 1:
             target_text_label = [IGNORE_INDEX] * target_text_len
         elif text_pairs[turn_idx][1]["role"] == Role.MASK.value:
             target_text_label = [IGNORE_INDEX] * target_text_len
@@ -123,22 +133,25 @@ def _encode_avater_audio_example(
         text_input_ids += source_token_ids + target_token_ids
         text_labels += source_text_label + target_text_label
 
-        # audio
+        # audio input
         if "audio_features" in source_dict:
             audio_features += source_dict["audio_features"]
             audio_pos += source_dict["audio_pos"]
-        
-        if "audio_codes" in target_dict:
-            audio_codes_ids += target_dict["audio_codes"]
-            audio_codes_labels += target_dict["audio_codes"]
+
+        # audio output
+        if turn_idx == len(encoded_pairs) - 1 and "audio_codes" in target_dict:
+            audio_codes_ids = target_dict["audio_codes"]
+            audio_codes_labels = target_dict["audio_codes"]
+            t2a_attention_mask = tokenizer.convert_t2a_attention_mask(target_token_ids, target_dict["audio_codes"])
 
     assert len(text_input_ids) == len(text_labels), "The length of text_input_ids should equal with labels' length!"
-    assert len(audio_codes_ids) == len(audio_codes_labels), "The length of audio_codes_ids should equal with labels' length!"
+    assert (len(audio_codes_ids) == len(audio_codes_labels) and len(audio_codes_ids[0]) == len(audio_codes_labels[0])), "The length of audio_codes_ids should equal with labels' length!"
     return {
         "prefix_ids": prefix_ids,
         "text_input_ids": text_input_ids, "text_labels": text_labels,
         "audio_features": audio_features, "audio_pos": audio_pos,
-        "audio_codes_ids": audio_codes_ids, "audio_codes_labels": audio_codes_labels
+        "audio_codes_ids": audio_codes_ids, "audio_codes_labels": audio_codes_labels,
+        "t2a_attention_mask": t2a_attention_mask,
     }
 
 
@@ -151,7 +164,10 @@ def preprocess_avater_audio_dataset(
 ) -> Dict[str, List[List[int]]]:
     # build inputs with format `<bos> X Y <eos>` and labels with format `<ignore> ... <ignore> Y <eos>`
     # for multiturn examples, we only mask the prompt part in each prompt-response pair.
-    model_inputs = {"input_ids": [], "attention_mask": [], "labels": []}
+    model_inputs = {
+        "input_ids": [], "attention_mask": [], "text_labels": [],
+        "decoder_input_ids": []
+    }
     for i in range(len(examples["_prompt"])):
         if len(examples["_prompt"][i]) % 2 != 1 or len(examples["_response"][i]) != 1:
             logger.warning_rank0(
@@ -171,9 +187,20 @@ def preprocess_avater_audio_dataset(
             mask_history=data_args.mask_history,
         )
 
-        model_inputs["input_ids"].append(system_ids + input_ids)
-        model_inputs["attention_mask"].append([1] * (len(system_ids) + len(input_ids)))
-        model_inputs["labels"].append([IGNORE_INDEX] * len(system_ids) + labels)
+        # text encoder
+        model_inputs["input_ids"].append(enocde_outputs["prefix_ids"] + enocde_outputs["text_input_ids"])
+        model_inputs["attention_mask"].append([1] * (len(enocde_outputs["prefix_ids"]) + len(enocde_outputs["text_input_ids"])))
+        model_inputs["text_labels"].append([IGNORE_INDEX] * len(enocde_outputs["prefix_ids"]) + enocde_outputs["text_labels"])
+        
+        # audio encoder
+        
+        # tts adapter
+        model_inputs["decoder_input_ids"].append(enocde_outputs["audio_codes_ids"])
+        model_inputs["decoder_attention_mask"].append([1] * len(enocde_outputs["audio_codes_ids"]))
+        model_inputs["encoder_decoder_attention_mask"].append(enocde_outputs["t2a_attention_mask"])
+        model_inputs["labels"].append([1] * len(enocde_outputs["audio_codes_ids"]))
+
+        # other
         model_inputs["images"].append(examples["_images"][i])
         model_inputs["videos"].append(examples["_videos"][i])
 
@@ -205,10 +232,10 @@ def _get_preprocessed_dataset(
 
     column_names = list(next(iter(dataset)).keys())
     kwargs = {}
-    if not False:
+    if not data_args.streaming:
         kwargs = dict(
-            num_proc=16,
-            load_from_cache_file=(not False),
+            num_proc=1,
+            load_from_cache_file=(False),
             desc="Running tokenizer on dataset",
         )
 
@@ -234,7 +261,8 @@ def _get_preprocessed_dataset(
 
 def align_dataset(
     dataset,
-    dataset_attr: "DatasetAttr"
+    dataset_attr: "DatasetAttr",
+    data_args: "DataArguments",
 ):
     r"""
     Aligned dataset:
@@ -245,7 +273,7 @@ def align_dataset(
         _images: [],
         _videos: [],
     """
-    convert_func = partial(convert_avater_audio, dataset_attr=dataset_attr, data_args=None)
+    convert_func = partial(convert_avater_audio, dataset_attr=dataset_attr, data_args=data_args)
 
     column_names = list(next(iter(dataset)).keys())
     kwargs = {}
@@ -264,15 +292,17 @@ def align_dataset(
     )
 
 
-def load_single_dataset(data_files, tokenizer_dir):
+def load_single_dataset(data_dir, data_files, tokenizer_dir):
     dataset_attr = DatasetAttr(
         load_from="file",
         dataset_name="tts_adapter",
         stage="audio_tts",
-        formatting="avater_audio"
+        formatting="avater_audio",
     )
     data_args = DataArguments(
-        template="llama3"
+        template="llama3",
+        streaming=False,
+        dataset_dir=data_dir
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -283,7 +313,7 @@ def load_single_dataset(data_files, tokenizer_dir):
         trust_remote_code=True
     )
     
-    template = get_template_and_fix_tokenizer(tokenizer, data_args)
+    template = get_template_and_fix_tokenizer(tokenizer, data_args, is_avater_tokenizer=True)
 
     ##################################
     dataset = load_dataset(
@@ -299,16 +329,21 @@ def load_single_dataset(data_files, tokenizer_dir):
         trust_remote_code=False,
     )
 
-    dataset = align_dataset(dataset, dataset_attr)
+    dataset = align_dataset(dataset, dataset_attr, data_args)
 
     dataset = _get_preprocessed_dataset(
-        dataset, stage=dataset_attr.stage, template=template, tokenizer=tokenizer
+        dataset,
+        data_args=data_args,
+        stage=dataset_attr.stage,
+        template=template,
+        tokenizer=tokenizer
     )
 
     return dataset
 
 
 if __name__ == "__main__":
-    audio_file = sys.argv[1]
-    tokenizer_dir = sys.argv[2]
-    dataset = load_single_dataset([audio_file], tokenizer_dir)
+    audio_dir = sys.argv[1]
+    audio_file = sys.argv[2]
+    tokenizer_dir = sys.argv[3]
+    dataset = load_single_dataset(audio_dir, [audio_file], tokenizer_dir)
