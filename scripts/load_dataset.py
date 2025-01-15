@@ -142,6 +142,11 @@ def _encode_avater_audio_example(
         if turn_idx == len(encoded_pairs) - 1 and "audio_codes" in target_dict:
             audio_codes_ids = target_dict["audio_codes"]
             audio_codes_labels = target_dict["audio_codes"]
+            for idx in range(len(audio_codes_labels)):
+                if idx == 0:
+                    audio_codes_labels[idx] = audio_codes_labels[0][:-tokenizer.acoustic_delay] + [IGNORE_INDEX] * tokenizer.acoustic_delay
+                else:
+                    audio_codes_labels[idx] = [IGNORE_INDEX] * tokenizer.acoustic_delay + audio_codes_labels[0][tokenizer.acoustic_delay:]
             t2a_attention_mask = tokenizer.convert_t2a_attention_mask(target_token_ids, target_dict["audio_codes"])
 
     assert len(text_input_ids) == len(text_labels), "The length of text_input_ids should equal with labels' length!"
@@ -155,6 +160,24 @@ def _encode_avater_audio_example(
     }
 
 
+def print_avater_audio_dataset_example(
+    example: Dict[str, List[int]], tokenizer: "PreTrainedTokenizer"
+) -> None:
+    valid_labels = list(filter(lambda x: x != IGNORE_INDEX, example["text_labels"]))
+    print("input_ids:\n{}".format(example["input_ids"]), flush=True)
+    print(
+        "inputs:\n{}".format(
+            tokenizer.text_tokenizer.decode(example["input_ids"], skip_special_tokens=False)
+        ),
+        flush=True,
+    )
+    print("label_ids:\n{}".format(example["text_labels"]), flush=True)
+    print(
+        "text_labels:\n{}".format(tokenizer.text_tokenizer.decode(valid_labels, skip_special_tokens=False)),
+        flush=True,
+    )
+
+
 def preprocess_avater_audio_dataset(
     examples: Dict[str, List[Any]],
     template: "TemplateFeb",
@@ -166,7 +189,8 @@ def preprocess_avater_audio_dataset(
     # for multiturn examples, we only mask the prompt part in each prompt-response pair.
     model_inputs = {
         "input_ids": [], "attention_mask": [], "text_labels": [],
-        "decoder_input_ids": []
+        "decoder_input_ids": [], "decoder_attention_mask": [], "encoder_decoder_attention_mask": [], "labels": [],
+        "images": [], "videos": []
     }
     for i in range(len(examples["_prompt"])):
         if len(examples["_prompt"][i]) % 2 != 1 or len(examples["_response"][i]) != 1:
@@ -193,7 +217,7 @@ def preprocess_avater_audio_dataset(
         model_inputs["text_labels"].append([IGNORE_INDEX] * len(enocde_outputs["prefix_ids"]) + enocde_outputs["text_labels"])
         
         # audio encoder
-        
+
         # tts adapter
         model_inputs["decoder_input_ids"].append(enocde_outputs["audio_codes_ids"])
         model_inputs["decoder_attention_mask"].append([1] * len(enocde_outputs["audio_codes_ids"]))
@@ -228,7 +252,7 @@ def _get_preprocessed_dataset(
         processor=None,
         data_args=data_args,
     )
-    print_function = None
+    print_function = print_avater_audio_dataset_example
 
     column_names = list(next(iter(dataset)).keys())
     kwargs = {}
@@ -249,7 +273,7 @@ def _get_preprocessed_dataset(
     if True:
         try:
             print(f"{stage} eval example:" if is_eval else f"{stage} training example:", flush=True)
-            print_function(next(iter(dataset)))
+            print_function(next(iter(dataset)), tokenizer=tokenizer)
         except StopIteration:
             if stage == "pt":
                 raise RuntimeError("Cannot find sufficient samples, consider increasing dataset size.")

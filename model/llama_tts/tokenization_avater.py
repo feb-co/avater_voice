@@ -26,8 +26,10 @@ class AvaterTokenizer(PreTrainedTokenizer):
         short_wait_string="<|SHORT_WAIT|>",
         long_wait_string="<|LONG_WAIT|>",
         audio_tokenizer="moshi_mimi",
+        acoustic_delay=1,
+        text_duration_token=5,
         cpt_cache=".cache/",
-        device="cpu",
+        device="cuda",
         **kwargs
     ):
         if not os.path.isdir(text_tokenizer_path):
@@ -43,6 +45,9 @@ class AvaterTokenizer(PreTrainedTokenizer):
         self.audio_special_token = audio_special_token
         self.short_wait_string = short_wait_string
         self.long_wait_string = long_wait_string
+        self.acoustic_delay = acoustic_delay
+        self.device = device
+        self.text_duration_token = text_duration_token
 
         # tokenizer init
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
@@ -54,9 +59,10 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 device=device
             )
             self.audio_duration_token = 13
-            self.text_duration_token = 4
         else:
             raise NotImplementedError
+
+        self.phrase_stop_token = self.text_tokenizer.encode(f" {short_wait_string}", add_special_tokens=False)[0]
 
     def __repr__(self) -> str:
         added_tokens_decoder_rep = "\n\t".join([f"{k}: {v.__repr__()}," for k, v in self.text_tokenizer.added_tokens_decoder.items()])
@@ -74,7 +80,6 @@ class AvaterTokenizer(PreTrainedTokenizer):
         audio_signal: Optional[Union[List[Dict], AudioSignal]]=None,
         add_special_tokens=True,
         add_audio_special_tokens=True,
-        acoustic_delay: int=1,
         **kwargs
     ) -> Union[Tuple[List, List], List]:
         text_token_ids = self.text_tokenizer.encode(
@@ -82,6 +87,8 @@ class AvaterTokenizer(PreTrainedTokenizer):
             add_special_tokens=add_special_tokens,
             **kwargs
         )
+        boa_tokens = [self.audio_special_token["bos_token"]] * self.acoustic_delay
+        eoa_tokens = [self.audio_special_token["eos_token"]] * self.acoustic_delay
 
         if audio_signal:
             with torch.no_grad():
@@ -95,12 +102,16 @@ class AvaterTokenizer(PreTrainedTokenizer):
                         else:
                             split_token = None
 
-                        sub_codes = self.audio_tokenizer.encode(signal["signal"].audio_data if "signal" in signal else AudioSignal(signal["file"]).audio_data)[0]
+                        sub_codes = self.audio_tokenizer.encode(
+                            signal["signal"].audio_data.to(self.device)
+                            if "signal" in signal else
+                            AudioSignal(signal["file"]).audio_data.to(self.device)
+                        )[0]
                         for idx, sub_code in enumerate(sub_codes):
                             code_list: list = sub_code.tolist()
 
                             if split_token:
-                                code_list = code_list.insert(0, split_token)
+                                code_list.insert(0, split_token)
 
                             if len(codes) != len(sub_codes):
                                 codes.append(code_list)
@@ -108,22 +119,20 @@ class AvaterTokenizer(PreTrainedTokenizer):
                                 codes[idx] += code_list
 
                     for idx in range(len(codes)):
-                        pad_tokens = [self.audio_special_token["pad_token"]] * acoustic_delay
                         if add_audio_special_tokens:
                             if idx == 0:
-                                codes[idx] = [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]] + pad_tokens
+                                codes[idx] = [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]] + eoa_tokens
                             else:
-                                codes[idx] = pad_tokens + [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]]
+                                codes[idx] = boa_tokens + [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]]
                 else:
                     codes = self.audio_tokenizer.encode(audio_signal.audio_data)[0]
                     for idx in range(len(codes)):
-                        pad_tokens = [self.audio_special_token["pad_token"]] * acoustic_delay
                         codes[idx] = codes[idx].tolist()
                         if add_audio_special_tokens:
                             if idx == 0:
-                                codes[idx] = [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]] + pad_tokens
+                                codes[idx] = [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]] + eoa_tokens
                             else:
-                                codes[idx] = pad_tokens + [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]]
+                                codes[idx] = boa_tokens + [self.audio_special_token["bos_token"]] + codes[idx] + [self.audio_special_token["eos_token"]]
 
             return (text_token_ids, codes)
         else:
@@ -154,16 +163,30 @@ class AvaterTokenizer(PreTrainedTokenizer):
         audio_length = len(audio_tokens[0])
         text_length = len(text_tokens)
 
-        attention_mask = [[0 for _ in range(text_length)] for _ in range(audio_length)]
+        attention_mask = torch.zeros([audio_length, text_length])
         text_token_threshold = 0
         for audio_idx in range(audio_length):
             if audio_idx % self.audio_duration_token == 0:
                 text_token_threshold += self.text_duration_token
             text_token_threshold = self.get_complete_phrase(text_tokens, text_token_threshold)
-            print(audio_idx, text_token_threshold, "---", flush=True)
+            attention_mask[audio_idx][:text_token_threshold] = 1
 
-        assert text_token_threshold >= text_length, "audio_tokens need cover text_tokens!"
-        return attention_mask
+        try:
+            assert text_token_threshold >= text_length, "audio_tokens need cover text_tokens!"
+        except:
+            import pdb; pdb.set_trace()
+
+        return attention_mask.tolist()
 
     def get_complete_phrase(self, text_tokens: list[int], text_token_threshold: int):
-        pass
+        subwords = self.text_tokenizer.convert_ids_to_tokens(text_tokens)
+        current_phrase = subwords[:text_token_threshold]
+        new_text_token_threshold = text_token_threshold
+        for idx in range(text_token_threshold, len(subwords)):
+            if subwords[idx].startswith("Ġ") and text_tokens[idx] != self.phrase_stop_token:
+                break
+            else:
+                current_phrase.append(subwords[idx])
+                new_text_token_threshold += 1
+
+        return new_text_token_threshold
