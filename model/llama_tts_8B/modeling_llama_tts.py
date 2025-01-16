@@ -910,7 +910,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
             next_cache = next_cache.to_legacy_cache()
-        
+
         # Logits
         logits = self.adapter_head(hidden_states)
         logits = logits.float()

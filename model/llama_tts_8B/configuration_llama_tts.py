@@ -46,5 +46,5 @@ class LlamaTTSConfig(LlamaConfig):
             del llm_config["architectures"]
             del llm_config["model_type"]
             kwargs.update(llm_config)
-        
+
         super().__init__(**kwargs)
