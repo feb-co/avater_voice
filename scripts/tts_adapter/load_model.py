@@ -5,8 +5,8 @@ from typing import Optional, List
 from transformers import AutoConfig, AutoModel
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from model.llama_tts.configuration_llama_tts import LlamaTTSConfig
-from model.llama_tts.modeling_llama_tts import LlamaTTS
+from model.llama_tts_8B.configuration_llama_tts import LlamaTTSConfig
+from model.llama_tts_8B.modeling_llama_tts import LlamaTTS
 
 
 def load_llama_tts(model_path, llm_path):
