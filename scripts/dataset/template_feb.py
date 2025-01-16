@@ -168,11 +168,12 @@ class TemplateFeb:
             prompt_pairs.append(self._convert_elements_to_ids(tokenizer, elements, return_dict=True))
 
         if response_message["role"] == Role.ASSISTANT.value:
-            text_element = self.format_assistant.apply(content=response_message["content"])[0]
             audio_element = response_message["audios"]
-            response_encode = tokenizer.encode(text=text_element, audio_signal=audio_element, add_special_tokens=False)
+            text_elements = self.format_assistant.apply(content=response_message["content"])
+            token_ids = self._convert_elements_to_ids(tokenizer, text_elements)
+            response_encode = tokenizer.encode(text=None, audio_signal=audio_element, add_special_tokens=False)
             if isinstance(response_encode, tuple):
-                response = {"token_ids": response_encode[0], "audio_codes": response_encode[1]}
+                response = {"token_ids": token_ids, "audio_codes": response_encode[1]}
             else:
                 response = {"token_ids": response_encode}
         else:
@@ -237,7 +238,7 @@ class TemplateFeb:
         for idx, elem in enumerate(elements):
             if isinstance(elem, str):
                 if len(elem) != 0:
-                    if idx>0 and isinstance(elements[idx], dict) and self.format_user_audio.slots[0].get("token") == elements[idx].get("token"):
+                    if idx>0 and isinstance(elements[idx-1], dict) and self.format_user_audio.slots[0].get("token") == elements[idx-1].get("token"):
                         sub_token_ids, sub_audio_features, sub_audio_pos = tokenizer.encode_whisper_features(elem)
                         for start_index, length in sub_audio_pos:
                             audio_pos.append([len(token_ids)+start_index, length])

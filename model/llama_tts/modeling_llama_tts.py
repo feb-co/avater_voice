@@ -112,7 +112,7 @@ class Seq2SeqCausalLMOutputWithCrossAttentions(ModelOutput):
             Hidden states output from each layer of the encoder.
         encoder_attentions (`tuple(torch.FloatTensor)`, *optional*):
             Attention weights from each layer of the encoder.
-        decoder_logits (`torch.FloatTensor`):
+        decoder_logits (`List[torch.FloatTensor]`):
             Prediction scores from the decoder language modeling head.
         decoder_past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*):
             Cached key and value states in the decoder.
@@ -128,7 +128,7 @@ class Seq2SeqCausalLMOutputWithCrossAttentions(ModelOutput):
     encoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     encoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-    decoder_logits: torch.FloatTensor = None
+    decoder_logits: List[torch.FloatTensor] = None
     decoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     decoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     decoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
@@ -986,6 +986,7 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        valid_tokens_pos: Optional[torch.Tensor] = None,
         encoder_outputs: Optional[List[torch.FloatTensor]] = None,
         encoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -994,12 +995,13 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
         encoder_decoder_attention_mask: Optional[torch.LongTensor] = None,
         decoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
+        labels: List[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, Seq2SeqCausalLMOutputWithCrossAttentions]:
         r"""
         Args:
@@ -1030,11 +1032,21 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
                 return_dict=True,
                 cache_position=cache_position,
             )
+            encoder_outputs_hidden_state = encoder_outputs.hidden_states[-1]
+        else:
+            encoder_outputs_hidden_state = encoder_outputs[-1]
+
+        if valid_tokens_pos is not None:
+            batch_size, seq_len, h_dim = encoder_outputs_hidden_state.size()
+            pos_bias = torch.arange(batch_size).view(-1, 1) * seq_len
+            encoder_outputs_hidden_state = encoder_outputs_hidden_state.view(-1, h_dim).index_select(
+                0, (valid_tokens_pos+pos_bias).view(-1)
+            ).contiguous().view(batch_size, -1, h_dim)
 
         decoder_outputs: AdapterModelOutputWithPastAndCrossAttentions = self.tts_adapter(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_outputs.hidden_states[-1],
+            encoder_hidden_states=encoder_outputs_hidden_state,
             encoder_attention_mask=encoder_decoder_attention_mask,
             past_key_values=decoder_past_key_values,
             inputs_embeds=decoder_inputs_embeds,
@@ -1044,21 +1056,33 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
             return_dict=True,
         )
 
+        decoder_logits = []
+        for i in range(self.config.code_layers):
+            decoder_logits.append(
+                decoder_outputs.logits[
+                    ..., 
+                    (self.audio_vocab_size//self.config.code_layers) * i : (self.audio_vocab_size//self.config.code_layers) * (i + 1)
+                ]
+            )
+
         # Loss
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = decoder_outputs.logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            loss = []
+            for idx in range(self.config.code_layers):
+                # Shift so that tokens < n predict n
+                shift_logits = decoder_logits[idx][..., :-1, :].contiguous()
+                shift_labels = labels[idx][..., 1:].contiguous()
 
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.audio_vocab_size)
-            shift_labels = shift_labels.view(-1)
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_logits = shift_logits.view(-1, (self.audio_vocab_size//self.config.code_layers))
+                shift_labels = shift_labels.view(-1)
 
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss.append(loss_fct(shift_logits, shift_labels))
+            loss = sum(loss)/len(loss)
 
         return Seq2SeqCausalLMOutputWithCrossAttentions(
             loss=loss,
@@ -1066,7 +1090,7 @@ class LlamaTTS(LlamaTTSPreTrainedModel):
             encoder_past_key_values=encoder_outputs.past_key_values,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
-            decoder_logits=decoder_outputs.logits,
+            decoder_logits=decoder_logits,
             decoder_past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
             decoder_attentions=decoder_outputs.attentions,

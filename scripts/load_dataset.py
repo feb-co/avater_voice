@@ -105,7 +105,7 @@ def _encode_avater_audio_example(
 
     messages = prompt + response
 
-    text_input_ids, text_labels = [], []
+    text_input_ids, text_labels, valid_tokens_pos = [], [], []
     audio_features, audio_pos = [], []
     audio_codes_ids, audio_codes_labels = [], []
     t2a_attention_mask = []
@@ -129,6 +129,7 @@ def _encode_avater_audio_example(
             target_text_label = [IGNORE_INDEX] * target_text_len
         else:
             target_text_label = target_token_ids
+            valid_tokens_pos = [idx for idx in range(len(text_labels), len(text_labels)+len(target_token_ids))]
 
         text_input_ids += source_token_ids + target_token_ids
         text_labels += source_text_label + target_text_label
@@ -153,7 +154,7 @@ def _encode_avater_audio_example(
     assert (len(audio_codes_ids) == len(audio_codes_labels) and len(audio_codes_ids[0]) == len(audio_codes_labels[0])), "The length of audio_codes_ids should equal with labels' length!"
     return {
         "prefix_ids": prefix_ids,
-        "text_input_ids": text_input_ids, "text_labels": text_labels,
+        "text_input_ids": text_input_ids, "text_labels": text_labels, "valid_tokens_pos": valid_tokens_pos,
         "audio_features": audio_features, "audio_pos": audio_pos,
         "audio_codes_ids": audio_codes_ids, "audio_codes_labels": audio_codes_labels,
         "t2a_attention_mask": t2a_attention_mask,
@@ -188,7 +189,7 @@ def preprocess_avater_audio_dataset(
     # build inputs with format `<bos> X Y <eos>` and labels with format `<ignore> ... <ignore> Y <eos>`
     # for multiturn examples, we only mask the prompt part in each prompt-response pair.
     model_inputs = {
-        "input_ids": [], "attention_mask": [], "text_labels": [],
+        "input_ids": [], "attention_mask": [], "text_labels": [], "valid_tokens_pos": [],
         "decoder_input_ids": [], "decoder_attention_mask": [], "encoder_decoder_attention_mask": [], "labels": [],
         "images": [], "videos": []
     }
@@ -215,7 +216,8 @@ def preprocess_avater_audio_dataset(
         model_inputs["input_ids"].append(enocde_outputs["prefix_ids"] + enocde_outputs["text_input_ids"])
         model_inputs["attention_mask"].append([1] * (len(enocde_outputs["prefix_ids"]) + len(enocde_outputs["text_input_ids"])))
         model_inputs["text_labels"].append([IGNORE_INDEX] * len(enocde_outputs["prefix_ids"]) + enocde_outputs["text_labels"])
-        
+        model_inputs["valid_tokens_pos"].append(enocde_outputs["valid_tokens_pos"])
+
         # audio encoder
 
         # tts adapter
