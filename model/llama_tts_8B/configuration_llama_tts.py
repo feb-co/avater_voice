@@ -40,6 +40,7 @@ class LlamaTTSConfig(LlamaConfig):
         self.eoa_token_id = eoa_token_id
         self.tie_audio_embeddings = tie_audio_embeddings
 
+        self.llm_path = llm_path
         if llm_path is not None:
             llm_config_path = os.path.join(llm_path, "config.json")
             llm_config = json.load(open(llm_config_path, "r", encoding="utf-8"))

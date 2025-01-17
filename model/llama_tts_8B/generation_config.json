@@ -1,0 +1,9 @@
+{
+  "do_sample": true,
+  "temperature": 0.6,
+  "top_p": 0.9,
+  "_from_model_config": true,
+  "boa_token_id": 2049,
+  "eoa_token_id": 2050,
+  "transformers_version": "4.43.0.dev0"
+}

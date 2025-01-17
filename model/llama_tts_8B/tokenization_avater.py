@@ -1,5 +1,6 @@
 import os
 import json
+import copy
 import torch
 import whisper
 from audiotools import AudioSignal
@@ -40,6 +41,8 @@ class AvaterTokenizer(PreTrainedTokenizer):
 
         if not os.path.exists(cpt_cache):
             os.mkdir(cpt_cache)
+
+        self.init_kwargs = copy.deepcopy(kwargs)
 
         # var init
         self.audio_special_token = audio_special_token

@@ -16,6 +16,7 @@ from transformers.utils import (
     ModelOutput
 )
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import (
@@ -932,7 +933,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         )
 
 
-class LlamaTTS(LlamaTTSPreTrainedModel):
+class LlamaTTS(LlamaTTSPreTrainedModel, GenerationMixin):
     def __init__(self, config: LlamaTTSConfig):
         super().__init__(config)
         
