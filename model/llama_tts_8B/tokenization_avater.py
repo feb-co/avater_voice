@@ -31,7 +31,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
         acoustic_delay=1,
         text_duration_token=5,
         cpt_cache=".cache/",
-        device="cuda",
+        device="cpu",
         **kwargs
     ):
         if not os.path.isdir(text_tokenizer_path):
@@ -65,6 +65,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 device=device
             )
             self.audio_duration_token = 13
+            self.code_size = 2048
         else:
             raise NotImplementedError
 
@@ -128,9 +129,24 @@ class AvaterTokenizer(PreTrainedTokenizer):
                         raise ValueError(f"Invalid padding strategy: {padding_side}")
 
                     batch_outputs[key].append(outputs)
-            elif key in ("decoder_input_ids", "decoder_labels"):
+            elif key in ("decoder_input_ids",):
                 max_length = max([len(item[0]) for item in values])
                 for value in values:
+                    outputs = []
+                    difference = max_length - len(value[0])
+                    for layer_idx, out in enumerate(value):
+                        if padding_side == "right":
+                            out = out + self.audio_code_shift([pad_token], layer_idx) * difference
+                        elif padding_side == "left":
+                            out = self.audio_code_shift([pad_token], layer_idx) * difference + out
+                        else:
+                            raise ValueError(f"Invalid padding strategy:{padding_side}")
+
+                        outputs.append(out)
+                    batch_outputs[key].append(outputs)
+            elif key in ("decoder_labels", ):
+                max_length = max([len(item[0]) for item in values])
+                for layer_idx, value in enumerate(values):
                     outputs = []
                     difference = max_length - len(value[0])
                     for out in value:
@@ -274,3 +290,6 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 new_text_token_threshold += 1
 
         return new_text_token_threshold
+
+    def audio_code_shift(self, input_ids, layer_idx):
+        return [input_id + layer_idx * (self.code_size+len(self.audio_special_token)) for input_id in input_ids]

@@ -394,11 +394,11 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         # Proj Q,K,V based on past_key_value
         query_states = self._shape(self.q_proj(hidden_states), q_len, bsz, self.num_heads)
         if self.encoder_attn:
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            key_states = self._shape(self.k_proj(key_value_states), q_len, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(key_value_states), q_len, bsz, self.num_key_value_heads)
         else:
-            key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
-            value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
+            key_states = self._shape(self.k_proj(hidden_states), q_len, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(hidden_states), q_len, bsz, self.num_key_value_heads)
 
         # Rotary Embedding
         if self.encoder_attn:
@@ -457,8 +457,8 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
             q_len,
             dropout=dropout_rate,
             sliding_window=getattr(self, "sliding_window", None),
-            is_causal=self.is_causal,
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
+            is_causal=self.is_causal,
         )
 
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -772,7 +772,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             attention_mask = _prepare_4d_causal_attention_mask(
                 attention_mask, input_shape, inputs_embeds, past_key_values_length
             )
-        
+
         if (
             self.config._attn_implementation == "sdpa"
             and attention_mask is not None
@@ -810,7 +810,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
                 encoder_attention_mask = encoder_attention_mask.masked_fill(encoder_attention_mask.to(torch.bool), torch.finfo(inputs_embeds.dtype).min)
 
         if (
-            self.config._attn_implementation == "sdpa"
+            self.config._attn_implementation in ("sdpa", "flash_attention_2")
             and encoder_attention_mask is not None
             and encoder_attention_mask.device.type == "cuda"
             and not output_attentions
@@ -861,7 +861,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-            inputs_embeds = torch.sum(inputs_embeds, dim=1)/self.config.code_layers
+            inputs_embeds = torch.mean(inputs_embeds, dim=1)
 
         # expand cache
         return_legacy_cache = False
@@ -1115,12 +1115,11 @@ class LlamaTTS(LlamaTTSPreTrainedModel, GenerationMixin):
 
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, (self.audio_vocab_size//self.config.code_layers))
+            shift_logits = shift_logits.view(-1, decoder_logits.size(-1))
             shift_labels = shift_labels.view(-1)
 
             # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            loss = loss_fct(shift_logits, shift_labels.to(shift_logits.device))
 
         return Seq2SeqCausalLMOutputWithCrossAttentions(
             loss=loss,

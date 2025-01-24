@@ -5,14 +5,14 @@
   "use_fast": false,
   "text_tokenizer_path": "/mnt/ceph/huggingface/Llama-3.1-8B",
   "audio_special_token": {
-    "boa_token": 2049,
-    "eoa_token": 2050,
-    "short_wait_token": 2051,
-    "long_wait_token": 2052,
-    "<|reserved_special_token_0|>": 2053,
-    "<|reserved_special_token_1|>": 2054,
-    "<|reserved_special_token_2|>": 2055,
-    "<|reserved_special_token_3|>": 2056
+    "boa_token": 2048,
+    "eoa_token": 2049,
+    "short_wait_token": 2050,
+    "long_wait_token": 2051,
+    "<|reserved_special_token_0|>": 2052,
+    "<|reserved_special_token_1|>": 2053,
+    "<|reserved_special_token_2|>": 2054,
+    "<|reserved_special_token_3|>": 2055
   },
   "short_wait_string": "<|SHORT_WAIT|>",
   "long_wait_string": "<|LONG_WAIT|>",
@@ -25,5 +25,6 @@
       "tokenization_avater.AvaterTokenizer",
       null
       ]
-  }
+  },
+  "device": "cuda"
 }
