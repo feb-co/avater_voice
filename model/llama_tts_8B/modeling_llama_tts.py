@@ -19,6 +19,7 @@ from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_utils import (
     _add_variant,
     get_checkpoint_shard_files,
@@ -129,7 +130,7 @@ class Seq2SeqCausalLMOutputWithCrossAttentions(ModelOutput):
     encoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     encoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-    decoder_logits: List[torch.FloatTensor] = None
+    decoder_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
     decoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     decoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     decoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
@@ -530,6 +531,16 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+        if attention_mask is not None:
+            attention_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+
+        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
+        # Reference: https://github.com/pytorch/pytorch/issues/112577.
+        if query_states.device.type == "cuda" and attention_mask is not None:
+            query_states = query_states.contiguous()
+            key_states = key_states.contiguous()
+            value_states = value_states.contiguous()
+
         # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
         # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
@@ -573,10 +584,14 @@ class TTSAdapterLayer(nn.Module):
         self.dropout = config.tts_adapter_dropout
         self.embed_dim = config.tts_adapter_hidden_size
 
-        self.self_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
+        self.self_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation](
+            config=config,
+            layer_idx=layer_idx,
+            is_causal=True,
+        )
         self.self_attn_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
-        self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation if config._attn_implementation != "flash_attention_2" else "eager"](
+        self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation if config._attn_implementation != "flash_attention_2" else "sdpa"](
             config=config,
             layer_idx=layer_idx,
             encoder_attn=True,
@@ -757,6 +772,18 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             attention_mask = _prepare_4d_causal_attention_mask(
                 attention_mask, input_shape, inputs_embeds, past_key_values_length
             )
+        
+        if (
+            self.config._attn_implementation == "sdpa"
+            and attention_mask is not None
+            and attention_mask.device.type == "cuda"
+            and not output_attentions
+        ):
+            # Attend to all tokens in fully masked rows in the attention_mask, for example the relevant first rows when
+            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+            # Details: https://github.com/pytorch/pytorch/issues/110213
+            min_dtype = torch.finfo(inputs_embeds.dtype).min
+            attention_mask = AttentionMaskConverter._unmask_unattended(attention_mask, min_dtype)
 
         if encoder_hidden_states is not None and encoder_attention_mask is not None:
             if self._use_sdpa and not output_attentions and len(encoder_attention_mask.size())==2:
@@ -773,9 +800,26 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
                 encoder_attention_mask = _prepare_4d_attention_mask(
                     encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
                 )
-            else:
+            elif len(encoder_attention_mask.size())==3:
+                encoder_attention_mask = encoder_attention_mask.unsqueeze(1).to(inputs_embeds)
                 encoder_attention_mask = 1.0 - encoder_attention_mask
                 encoder_attention_mask = encoder_attention_mask.masked_fill(encoder_attention_mask.to(torch.bool), torch.finfo(inputs_embeds.dtype).min)
+            else:
+                encoder_attention_mask = encoder_attention_mask.to(inputs_embeds)
+                encoder_attention_mask = 1.0 - encoder_attention_mask
+                encoder_attention_mask = encoder_attention_mask.masked_fill(encoder_attention_mask.to(torch.bool), torch.finfo(inputs_embeds.dtype).min)
+
+        if (
+            self.config._attn_implementation == "sdpa"
+            and encoder_attention_mask is not None
+            and encoder_attention_mask.device.type == "cuda"
+            and not output_attentions
+        ):
+            # Attend to all tokens in fully masked rows in the encoder_attention_mask, for example the relevant first rows when
+            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+            # Details: https://github.com/pytorch/pytorch/issues/110213
+            min_dtype = torch.finfo(inputs_embeds.dtype).min
+            encoder_attention_mask = AttentionMaskConverter._unmask_unattended(encoder_attention_mask, min_dtype)
 
         return attention_mask, encoder_attention_mask
 
@@ -816,10 +860,8 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             use_cache = False
 
         if inputs_embeds is None:
-            inputs_embeds = []
-            for i in range(len(input_ids)):
-                inputs_embeds.append(self.embed_tokens(input_ids[i]))
-            inputs_embeds = sum(inputs_embeds)/len(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = torch.sum(inputs_embeds, dim=1)/self.config.code_layers
 
         # expand cache
         return_legacy_cache = False
@@ -996,7 +1038,7 @@ class LlamaTTS(LlamaTTSPreTrainedModel, GenerationMixin):
         encoder_decoder_attention_mask: Optional[torch.LongTensor] = None,
         decoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: List[torch.LongTensor] = None,
+        decoder_labels: List[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1039,11 +1081,14 @@ class LlamaTTS(LlamaTTSPreTrainedModel, GenerationMixin):
 
         if valid_tokens_pos is not None:
             batch_size, seq_len, h_dim = encoder_outputs_hidden_state.size()
-            pos_bias = torch.arange(batch_size).view(-1, 1) * seq_len
+            pos_bias = (torch.arange(batch_size).view(-1, 1) * seq_len).to(valid_tokens_pos)
+            select_index = (valid_tokens_pos+pos_bias).view(-1)
             encoder_outputs_hidden_state = encoder_outputs_hidden_state.view(-1, h_dim).index_select(
-                0, (valid_tokens_pos+pos_bias).view(-1)
+                0, select_index
             ).contiguous().view(batch_size, -1, h_dim)
 
+        assert len(decoder_input_ids.size()) == 3, "decoder_input_ids shape must equal [bsz, code_layers, tgt_len]"
+        bsz, code_layers, tgt_len = decoder_input_ids.size()
         decoder_outputs: AdapterModelOutputWithPastAndCrossAttentions = self.tts_adapter(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
@@ -1057,33 +1102,25 @@ class LlamaTTS(LlamaTTSPreTrainedModel, GenerationMixin):
             return_dict=True,
         )
 
-        decoder_logits = []
-        for i in range(self.config.code_layers):
-            decoder_logits.append(
-                decoder_outputs.logits[
-                    ..., 
-                    (self.audio_vocab_size//self.config.code_layers) * i : (self.audio_vocab_size//self.config.code_layers) * (i + 1)
-                ]
-            )
+        decoder_logits = decoder_outputs.logits.view(
+            bsz, tgt_len, code_layers, -1
+        ).transpose(1,2).contiguous() # [bsz, code_layers, tgt_len, audio_vocab]
 
         # Loss
         loss = None
-        if labels is not None:
-            loss = []
-            for idx in range(self.config.code_layers):
-                # Shift so that tokens < n predict n
-                shift_logits = decoder_logits[idx][..., :-1, :].contiguous()
-                shift_labels = labels[idx][..., 1:].contiguous()
+        if decoder_labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = decoder_logits[..., :-1, :].contiguous()
+            shift_labels = decoder_labels[..., 1:].contiguous()
 
-                # Flatten the tokens
-                loss_fct = CrossEntropyLoss()
-                shift_logits = shift_logits.view(-1, (self.audio_vocab_size//self.config.code_layers))
-                shift_labels = shift_labels.view(-1)
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, (self.audio_vocab_size//self.config.code_layers))
+            shift_labels = shift_labels.view(-1)
 
-                # Enable model parallelism
-                shift_labels = shift_labels.to(shift_logits.device)
-                loss.append(loss_fct(shift_logits, shift_labels))
-            loss = sum(loss)/len(loss)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
 
         return Seq2SeqCausalLMOutputWithCrossAttentions(
             loss=loss,

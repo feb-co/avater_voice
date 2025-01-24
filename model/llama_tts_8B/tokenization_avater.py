@@ -4,10 +4,11 @@ import copy
 import torch
 import whisper
 from audiotools import AudioSignal
+from collections.abc import Mapping, Sized
 from typing import Union, Any, Dict, List, Optional, Tuple
 
-from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
-from transformers.utils import logging
+from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer, EncodedInput, PaddingStrategy
+from transformers.utils import TensorType
 from transformers import AutoTokenizer
 
 
@@ -51,6 +52,8 @@ class AvaterTokenizer(PreTrainedTokenizer):
         self.acoustic_delay = acoustic_delay
         self.device = device
         self.text_duration_token = text_duration_token
+        self.pad_token = None
+        self.verbose = True
 
         # tokenizer init
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
@@ -76,6 +79,83 @@ class AvaterTokenizer(PreTrainedTokenizer):
             f" special_tokens={self.text_tokenizer.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
             " added_tokens_decoder={\n\t" + added_tokens_decoder_rep + "\n}\n)"
         )
+
+    def pad(
+        self,
+        encoded_inputs: Union[
+            BatchEncoding,
+            List[BatchEncoding],
+            Dict[str, EncodedInput],
+            Dict[str, List[EncodedInput]],
+            List[Dict[str, EncodedInput]],
+        ],
+        padding: Union[bool, str, PaddingStrategy] = True,
+        max_length: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+        padding_side: Optional[str] = "right",
+        return_attention_mask: Optional[bool] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        verbose: bool = True,
+    ) -> BatchEncoding:
+        # If we have a list of dicts, let's convert it in a dict of lists
+        # We do this to allow using this method as a collate_fn function in PyTorch Dataloader
+        if isinstance(encoded_inputs, (list, tuple)) and isinstance(encoded_inputs[0], Mapping):
+            encoded_inputs = {key: [example[key] for example in encoded_inputs] for key in encoded_inputs[0].keys()}
+
+        batch_outputs = {}
+        for key, values in encoded_inputs.items():
+            if key not in batch_outputs:
+                batch_outputs[key] = []
+
+            if "input_ids" == key:
+                pad_token = self.text_tokenizer.pad_token_id
+            elif "decoder_input_ids" == key:
+                pad_token = self.audio_special_token["eoa_token"]
+            elif "decoder_labels" == key:
+                pad_token = -100
+            else:
+                pad_token = 0
+
+            if key in ("input_ids", "attention_mask", "valid_tokens_pos", "decoder_attention_mask"):
+                max_length = max([len(item) for item in values])
+                for value in values:
+                    difference = max_length - len(value)
+                    if padding_side == "right":
+                        outputs = value + [pad_token] * difference
+                    elif padding_side == "left":
+                        outputs = [pad_token] * difference + value
+                    else:
+                        raise ValueError(f"Invalid padding strategy: {padding_side}")
+
+                    batch_outputs[key].append(outputs)
+            elif key in ("decoder_input_ids", "decoder_labels"):
+                max_length = max([len(item[0]) for item in values])
+                for value in values:
+                    outputs = []
+                    difference = max_length - len(value[0])
+                    for out in value:
+                        if padding_side == "right":
+                            out = out + [pad_token] * difference
+                        elif padding_side == "left":
+                            out = [pad_token] * difference + out
+                        else:
+                            raise ValueError(f"Invalid padding strategy:{padding_side}")
+
+                        outputs.append(out)
+                    batch_outputs[key].append(outputs)
+            elif key in ("encoder_decoder_attention_mask",):
+                max_length = [
+                    max([len(item) for item in values]),
+                    max([len(item[0]) for item in values]),
+                ]
+                for value in values:
+                    outputs = torch.zeros(max_length, dtype=torch.long)
+                    outputs[:len(value), :len(value[0])] = torch.LongTensor(value)
+                    batch_outputs[key].append(outputs.tolist())
+            else:
+                raise ValueError(f"Invalid key padding strategy: {key}")
+
+        return BatchEncoding(batch_outputs, tensor_type=return_tensors)
 
     def encode(
         self,
