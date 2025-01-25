@@ -1,10 +1,11 @@
 {
     "architectures": [
-      "LlamaTTS"
+      "LlamaTTSForCausalLM"
     ],
     "auto_map": {
       "AutoConfig": "configuration_llama_tts.LlamaTTSConfig",
-      "AutoModel": "modeling_llama_tts.LlamaTTS"
+      "AutoModel": "modeling_llama_tts.LlamaTTSForCausalLM",
+      "AutoModelForCausalLM": "modeling_llama_tts.LlamaTTSForCausalLM"
     },
     "audio_special_tokens": 8,
     "code_size": 2048,

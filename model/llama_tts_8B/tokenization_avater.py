@@ -4,11 +4,12 @@ import copy
 import torch
 import whisper
 from audiotools import AudioSignal
-from collections.abc import Mapping, Sized
+from collections.abc import Mapping
 from typing import Union, Any, Dict, List, Optional, Tuple
 
-from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer, EncodedInput, PaddingStrategy
+from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer, EncodedInput, PaddingStrategy, TOKENIZER_CONFIG_FILE
 from transformers.utils import TensorType
+from transformers.dynamic_module_utils import custom_object_save
 from transformers import AutoTokenizer
 
 
@@ -52,14 +53,20 @@ class AvaterTokenizer(PreTrainedTokenizer):
         self.acoustic_delay = acoustic_delay
         self.device = device
         self.text_duration_token = text_duration_token
-        self.pad_token = None
         self.verbose = True
+        self.chat_template = None
+        self.init_inputs = ()
+        for attr in self.SPECIAL_TOKENS_ATTRIBUTES:
+            setattr(self, attr, None)
 
         # tokenizer init
+        self.cpt_cache = cpt_cache
+        self.text_tokenizer_path = text_tokenizer_path
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
         self.whisper_tokenizer = whisper.load_model("small").to(device)
         if audio_tokenizer == "moshi_mimi":
             from mimi import MimiTokenizer
+            self.audio_tokenizer_type = audio_tokenizer
             self.audio_tokenizer = MimiTokenizer.load_from_checkpoint(
                 cpt_dir=cpt_cache,
                 device=device
@@ -77,9 +84,74 @@ class AvaterTokenizer(PreTrainedTokenizer):
             f"{self.__class__.__name__}(name_or_path='{self.text_tokenizer.name_or_path}',"
             f" vocab_size={self.text_tokenizer.vocab_size}, model_max_length={self.text_tokenizer.model_max_length}, is_fast={self.text_tokenizer.is_fast},"
             f" padding_side='{self.text_tokenizer.padding_side}', truncation_side='{self.text_tokenizer.truncation_side}',"
-            f" special_tokens={self.text_tokenizer.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
+            f" special_tokens={self.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
             " added_tokens_decoder={\n\t" + added_tokens_decoder_rep + "\n}\n)"
         )
+    
+    def save_pretrained(
+        self,
+        save_directory: Union[str, os.PathLike],
+        legacy_format: Optional[bool] = None,
+        filename_prefix: Optional[str] = None,
+        push_to_hub: bool = False,
+        **kwargs,
+    ) -> Tuple[str]:
+        if os.path.isfile(save_directory):
+            return
+
+        os.makedirs(save_directory, exist_ok=True)
+
+        tokenizer_config_file = os.path.join(
+            save_directory, (filename_prefix + "-" if filename_prefix else "") + TOKENIZER_CONFIG_FILE
+        )
+
+        tokenizer_config = copy.deepcopy(self.init_kwargs)
+
+        # Let's save the init kwargs
+        target_keys = set(self.init_kwargs.keys())
+        # Let's save the special tokens map (only the strings)
+        target_keys.update(["model_max_length", "clean_up_tokenization_spaces"])
+
+        for k in target_keys:
+            if hasattr(self, k):
+                tokenizer_config[k] = getattr(self, k)
+
+        tokenizer_config.update({
+            "name_or_path": "avater-tokenizer",
+            "add_prefix_space": False,
+            "use_fast": False,
+            "text_tokenizer_path": self.text_tokenizer_path,
+            "short_wait_string": self.short_wait_string,
+            "long_wait_string": self.long_wait_string,
+            "audio_tokenizer": self.audio_tokenizer_type,
+            "acoustic_delay": self.acoustic_delay,
+            "text_duration_token": self.text_duration_token,
+            "cpt_cache": self.cpt_cache,
+            "audio_special_token": self.audio_special_token,
+            "device": self.device
+        })
+        
+        tokenizer_class = self.__class__.__name__
+        # Remove the Fast at the end unless we have a special `PreTrainedTokenizerFast`
+        if tokenizer_class.endswith("Fast") and tokenizer_class != "PreTrainedTokenizerFast":
+            tokenizer_class = tokenizer_class[:-4]
+        tokenizer_config["tokenizer_class"] = tokenizer_class
+
+        if getattr(self, "_auto_map", None) is not None:
+            tokenizer_config["auto_map"] = self._auto_map
+        
+        # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
+        # loaded from the Hub.
+        if self._auto_class is not None:
+            custom_object_save(self, save_directory, config=tokenizer_config)
+
+        with open(tokenizer_config_file, "w", encoding="utf-8") as f:
+            out_str = json.dumps(tokenizer_config, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            f.write(out_str)
+
+        file_names = (tokenizer_config_file, )
+
+        return file_names
 
     def pad(
         self,

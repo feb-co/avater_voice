@@ -2,7 +2,7 @@ import os
 import sys
 import torch
 from typing import Optional, List
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModelForCausalLM
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from model.llama_tts_8B.configuration_llama_tts import LlamaTTSConfig
@@ -11,7 +11,7 @@ from model.llama_tts_8B.modeling_llama_tts import LlamaTTS
 
 def load_llama_tts(model_path, llm_path):
     model_config: LlamaTTSConfig = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    model: LlamaTTS = AutoModel.from_config(model_config, trust_remote_code=True)
+    model: LlamaTTS = AutoModelForCausalLM.from_config(model_config, trust_remote_code=True)
     model.load_llm_state_dict(llm_path)
     return model_config, model
 

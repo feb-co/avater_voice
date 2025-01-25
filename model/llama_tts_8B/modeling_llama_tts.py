@@ -975,7 +975,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         )
 
 
-class LlamaTTS(LlamaTTSPreTrainedModel, GenerationMixin):
+class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
     def __init__(self, config: LlamaTTSConfig):
         super().__init__(config)
         
