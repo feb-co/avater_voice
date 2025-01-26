@@ -261,8 +261,8 @@ class TTSAdapterAttention(nn.Module):
         self.attention_dropout = config.tts_adapter_attention_dropout
         self.num_heads = config.tts_adapter_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        self.num_key_value_heads = self.num_heads // 4
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.num_key_value_groups = 4
+        self.num_key_value_heads = self.num_heads // self.num_key_value_groups
         self.max_position_embeddings = config.max_position_embeddings
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
@@ -1109,17 +1109,13 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
         # Loss
         loss = None
         if decoder_labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = decoder_logits[..., :-1, :].contiguous()
-            shift_labels = decoder_labels[..., 1:].contiguous()
-
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, decoder_logits.size(-1))
-            shift_labels = shift_labels.view(-1)
-
-            # Enable model parallelism
-            loss = loss_fct(shift_logits, shift_labels.to(shift_logits.device))
+            kwargs.pop("labels")
+            loss = self.loss_function(
+                logits=decoder_logits.view(-1, tgt_len, decoder_logits.size(-1)),
+                labels=decoder_labels.view(-1, tgt_len),
+                vocab_size=decoder_logits.size(-1),
+                **kwargs
+            )
 
         return Seq2SeqCausalLMOutputWithCrossAttentions(
             loss=loss,
