@@ -63,7 +63,12 @@ class AvaterTokenizer(PreTrainedTokenizer):
         self.cpt_cache = cpt_cache
         self.text_tokenizer_path = text_tokenizer_path
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
-        self.whisper_tokenizer = whisper.load_model("small").to(device)
+        try:
+            self.whisper_tokenizer = whisper.load_model("small").to(device)
+        except:
+            import ssl
+            ssl._create_default_https_context = ssl._create_unverified_context
+            self.whisper_tokenizer = whisper.load_model("small").to(device)
         if audio_tokenizer == "moshi_mimi":
             from mimi import MimiTokenizer
             self.audio_tokenizer_type = audio_tokenizer
