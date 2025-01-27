@@ -37,7 +37,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
     ):
         if not os.path.isdir(text_tokenizer_path):
             raise ValueError(
-                f"Can't find a text vocabulary file at path '{text_tokenizer_path}'. To load the vocabulary from a Google pretrained"
+                f"Can't find a text tokenizer file at path '{text_tokenizer_path}'. To load the vocabulary from a Google pretrained"
                 " model use `tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)`"
             )
 

@@ -14,7 +14,7 @@
   "long_wait_string": "<|LONG_WAIT|>",
   "audio_tokenizer": "moshi_mimi",
   "acoustic_delay": 1,
-  "text_duration_token": 5,
+  "text_duration_token": 10,
   "cpt_cache": ".cache/",
   "audio_special_token": {
     "boa_token": 2048,
