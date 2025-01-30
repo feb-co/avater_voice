@@ -2,11 +2,16 @@ import sys
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.cache_utils import DynamicCache
+
+from avater_infer.models.llama.configuration_voice import LlamaVoiceConfig
+from avater_infer.cache_utils import AvaterCache
 
 
 def load_model_tokenizer(model_path):
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
+    config = LlamaVoiceConfig.from_pretrained(model_path)
+    model = AutoModelForCausalLM.from_pretrained(model_path, config=config, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
     return tokenizer, model
 
 
@@ -29,10 +34,18 @@ You are Ray Dalio, and you are chatting with the user via voice.<|eot_id|><|star
     # init decoder input
     decoder_input_ids = torch.LongTensor([[tokenizer.audio_code_shift([tokenizer.audio_special_token["boa_token"]], layer_idx=idx) for idx in range(model.config.code_layers)]]).to(input_ids)
 
+    # init cache
+    past_key_values = AvaterCache(
+        DynamicCache(),
+        DynamicCache(),
+        DynamicCache(),
+    )
+
     inputs = {
         "input_ids": input_ids.to(model.device),
         "valid_tokens_pos": valid_tokens_pos.to(model.device),
         "decoder_input_ids": decoder_input_ids.to(model.device),
+        "past_key_values": past_key_values
     }
 
     # generate

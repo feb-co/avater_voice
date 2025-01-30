@@ -12,7 +12,7 @@ from transformers.utils import (
     is_flash_attn_greater_or_equal_2_10,
     logging,
 )
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_utils import PreTrainedModel
@@ -151,7 +151,7 @@ class TTSAdapterAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
         encoder_position_embeddings: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -159,7 +159,7 @@ class TTSAdapterAttention(nn.Module):
         """Input shape: Batch x Time x Channel"""
         bsz, tgt_len, _ = hidden_states.size()
 
-        # Proj Q,K,V based on past_key_value
+        # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
         if self.encoder_attn:
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
@@ -180,8 +180,8 @@ class TTSAdapterAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
         # Past Key Value
-        if past_key_value is not None:
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        if past_key_values is not None:
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -215,7 +215,7 @@ class TTSAdapterAttention(nn.Module):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, past_key_values
 
 
 class TTSAdapterFlashAttention2(TTSAdapterAttention):
@@ -234,21 +234,15 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
         encoder_position_embeddings: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if isinstance(past_key_value, StaticCache):
-            raise ValueError(
-                "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
-                "make sure to use `sdpa` in the mean time, and open an issue at https://github.com/huggingface/transformers"
-            )
-
         output_attentions = False
         bsz, q_len, _ = hidden_states.size()
 
-        # Proj Q,K,V based on past_key_value
+        # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), q_len, bsz, self.num_heads)
         if self.encoder_attn:
             key_states = self._shape(self.k_proj(key_value_states), q_len, bsz, self.num_key_value_heads)
@@ -269,8 +263,8 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
         # Past Key Value
-        if past_key_value is not None:
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        if past_key_values is not None:
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
         # to be able to avoid many of these transpose/reshape/view.
@@ -324,7 +318,7 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, past_key_values
 
 
 class TTSAdapterSdpaAttention(TTSAdapterAttention):
@@ -335,7 +329,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
         encoder_position_embeddings: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -352,7 +346,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
                 attention_mask=attention_mask,
                 position_embeddings=position_embeddings,
                 encoder_position_embeddings=encoder_position_embeddings,
-                past_key_value=past_key_value,
+                past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position
@@ -360,7 +354,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         
         bsz, tgt_len, _ = hidden_states.size()
 
-        # Proj Q,K,V based on past_key_value
+        # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
         if self.encoder_attn:
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
@@ -381,8 +375,8 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
         # Past Key Value
-        if past_key_value is not None:
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        if past_key_values is not None:
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -425,7 +419,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
 
         attn_output = self.o_proj(attn_output)
         
-        return attn_output, None, past_key_value
+        return attn_output, None, past_key_values
 
 
 TTS_ADAPTER_ATTENTION_CLASSES = {
@@ -464,7 +458,7 @@ class TTSAdapterLayer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        past_key_values: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = True,
         position_embeddings: Optional[torch.Tensor] = None,
@@ -496,7 +490,7 @@ class TTSAdapterLayer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
-            past_key_value=past_key_value,
+            past_key_values=past_key_values,
             output_attentions=output_attentions,
             use_cache=use_cache,
         )
@@ -508,13 +502,14 @@ class TTSAdapterLayer(nn.Module):
 
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
 
-        hidden_states, cross_attn_weights, cross_attn_present_key_value = self.encoder_attn(
+        hidden_states, cross_attn_weights, present_key_value = self.encoder_attn(
             hidden_states=hidden_states,
             key_value_states=encoder_hidden_states,
             attention_mask=encoder_attention_mask,
             position_embeddings=position_embeddings,
             encoder_position_embeddings=encoder_position_embeddings,
             output_attentions=output_attentions,
+            past_key_values=present_key_value,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
@@ -531,7 +526,7 @@ class TTSAdapterLayer(nn.Module):
             outputs += (self_attn_weights, cross_attn_weights)
 
         if use_cache:
-            outputs += (present_key_value, cross_attn_present_key_value)
+            outputs += (present_key_value,)
 
         return outputs
 
@@ -721,16 +716,6 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             inputs_embeds = torch.sum(inputs_embeds, dim=1)
 
         # expand cache
-        return_legacy_cache = False
-        if (
-            use_cache and not isinstance(past_key_values, Cache) and not self.training
-        ):  # kept for BC (non `Cache` `past_key_values` inputs)
-            return_legacy_cache = True
-            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            logger.warning_once(
-                "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
-                "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
-            )
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         # expand posistion
@@ -757,13 +742,11 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
-        next_decoder_cache = () if use_cache else None
+        next_decoder_cache = None
 
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -784,7 +767,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
                     attention_mask=attention_mask,
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=encoder_attention_mask,
-                    past_key_value=past_key_value,
+                    past_key_values=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     position_embeddings=position_embeddings,
@@ -793,7 +776,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache += (layer_outputs[3 if output_attentions else 1],)
+                next_decoder_cache = layer_outputs[3 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -808,8 +791,6 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
-        if return_legacy_cache:
-            next_cache = next_cache.to_legacy_cache()
 
         # Logits
         logits = self.adapter_head(hidden_states)

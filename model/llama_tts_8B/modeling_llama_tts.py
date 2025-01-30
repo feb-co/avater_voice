@@ -5,17 +5,18 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 from transformers.utils import logging
-from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import get_checkpoint_shard_files
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 from avater_infer.models.llama import TTSAdapter, LlamaTTSPreTrainedModel
+from avater_infer.cache_utils import AvaterCache
 from avater_infer.modeling_utils import get_archive_file
 from avater_infer.modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions, Seq2SeqCausalLMOutputWithCrossAttentions
 
-from configuration_llama_tts import LlamaTTSConfig
+
+from .configuration_llama_tts import LlamaTTSConfig
 
 
 logger = logging.get_logger(__name__)
@@ -77,12 +78,10 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         valid_tokens_pos: Optional[torch.Tensor] = None,
         encoder_outputs: Optional[List[torch.FloatTensor]] = None,
-        encoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         decoder_input_ids: List[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.LongTensor] = None,
         encoder_decoder_attention_mask: Optional[torch.LongTensor] = None,
-        decoder_past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
         decoder_labels: List[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -90,6 +89,7 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[AvaterCache] = None,
         **kwargs,
     ) -> Union[Tuple, Seq2SeqCausalLMOutputWithCrossAttentions]:
         r"""
@@ -113,7 +113,7 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
             encoder_outputs: CausalLMOutputWithPast = self.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                past_key_values=encoder_past_key_values,
+                past_key_values=past_key_values.llm_attention_cache,
                 inputs_embeds=inputs_embeds,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
@@ -140,7 +140,7 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
             attention_mask=decoder_attention_mask,
             encoder_hidden_states=encoder_outputs_hidden_state,
             encoder_attention_mask=encoder_decoder_attention_mask,
-            past_key_values=decoder_past_key_values,
+            past_key_values=past_key_values,
             inputs_embeds=decoder_inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
