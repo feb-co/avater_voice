@@ -29,7 +29,6 @@ class AvaterTokenizer(PreTrainedTokenizer):
         short_wait_string="<|SHORT_WAIT|>",
         long_wait_string="<|LONG_WAIT|>",
         audio_tokenizer="moshi_mimi",
-        acoustic_delay=1,
         text_duration_token=5,
         cpt_cache=".cache/",
         device="cpu",
@@ -50,7 +49,6 @@ class AvaterTokenizer(PreTrainedTokenizer):
         self.audio_special_token = audio_special_token
         self.short_wait_string = short_wait_string
         self.long_wait_string = long_wait_string
-        self.acoustic_delay = acoustic_delay
         self.device = device
         self.text_duration_token = text_duration_token
         self.verbose = True
@@ -129,13 +127,12 @@ class AvaterTokenizer(PreTrainedTokenizer):
             "short_wait_string": self.short_wait_string,
             "long_wait_string": self.long_wait_string,
             "audio_tokenizer": self.audio_tokenizer_type,
-            "acoustic_delay": self.acoustic_delay,
             "text_duration_token": self.text_duration_token,
             "cpt_cache": self.cpt_cache,
             "audio_special_token": self.audio_special_token,
             "device": self.device
         })
-        
+
         tokenizer_class = self.__class__.__name__
         # Remove the Fast at the end unless we have a special `PreTrainedTokenizerFast`
         if tokenizer_class.endswith("Fast") and tokenizer_class != "PreTrainedTokenizerFast":
@@ -267,9 +264,6 @@ class AvaterTokenizer(PreTrainedTokenizer):
         else:
             text_token_ids = None
             
-        boa_tokens = [self.audio_special_token["boa_token"]] * self.acoustic_delay
-        eoa_tokens = [self.audio_special_token["eoa_token"]] * self.acoustic_delay
-
         if audio_signal:
             with torch.no_grad():
                 if isinstance(audio_signal, list):
@@ -301,18 +295,18 @@ class AvaterTokenizer(PreTrainedTokenizer):
                     for idx in range(len(codes)):
                         if add_audio_special_tokens:
                             if idx == 0:
-                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]] + eoa_tokens
+                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
                             else:
-                                codes[idx] = boa_tokens + [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
                 else:
                     codes = self.audio_tokenizer.encode(audio_signal.audio_data)[0]
                     for idx in range(len(codes)):
                         codes[idx] = codes[idx].tolist()
                         if add_audio_special_tokens:
                             if idx == 0:
-                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]] + eoa_tokens
+                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
                             else:
-                                codes[idx] = boa_tokens + [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
 
             return (text_token_ids, codes)
         else:

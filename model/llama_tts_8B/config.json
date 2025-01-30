@@ -10,7 +10,7 @@
     "audio_special_tokens": 8,
     "code_size": 2048,
     "code_layers": 8,
-    "tts_adapter_hidden_layers": 6,
+    "tts_adapter_hidden_layers": 12,
     "tts_adapter_hidden_size": 768,
     "tts_adapter_intermediate_size": 2688,
     "tts_adapter_attention_heads": 12,

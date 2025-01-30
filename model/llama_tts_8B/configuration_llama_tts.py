@@ -1,11 +1,9 @@
 """LLaMA TTS model configuration"""
 
-import os
-import json
-from transformers import LlamaConfig
+from avater_infer.models.llama import LlamaVoiceConfig
 
 
-class LlamaTTSConfig(LlamaConfig):
+class LlamaTTSConfig(LlamaVoiceConfig):
     model_type = "llama tts"
 
     def __init__(
@@ -25,27 +23,19 @@ class LlamaTTSConfig(LlamaConfig):
         tie_audio_embeddings=False,
         **kwargs,
     ):
-        self.audio_special_tokens = audio_special_tokens
-        self.audio_vocab_size = (code_size + audio_special_tokens) * code_layers
-        self.code_size = code_size
-        self.code_layers = code_layers
-        self.tts_adapter_hidden_layers = tts_adapter_hidden_layers
-        self.tts_adapter_hidden_size = tts_adapter_hidden_size
-        self.tts_adapter_intermediate_size = tts_adapter_intermediate_size
-        self.tts_adapter_attention_heads = tts_adapter_attention_heads
-        self.tts_adapter_dropout = tts_adapter_dropout
-        self.tts_adapter_attention_dropout = tts_adapter_attention_dropout
-        self.scale_embedding = 1.0
-        self.boa_token_id = boa_token_id
-        self.eoa_token_id = eoa_token_id
-        self.tie_audio_embeddings = tie_audio_embeddings
-
-        self.llm_path = llm_path
-        if llm_path is not None:
-            llm_config_path = os.path.join(llm_path, "config.json")
-            llm_config = json.load(open(llm_config_path, "r", encoding="utf-8"))
-            del llm_config["architectures"]
-            del llm_config["model_type"]
-            kwargs.update(llm_config)
-
-        super().__init__(**kwargs)
+        super().__init__(
+            audio_special_tokens=audio_special_tokens,
+            code_size=code_size,
+            code_layers=code_layers,
+            tts_adapter_hidden_layers=tts_adapter_hidden_layers,
+            tts_adapter_hidden_size=tts_adapter_hidden_size,
+            tts_adapter_intermediate_size=tts_adapter_intermediate_size,
+            tts_adapter_attention_heads=tts_adapter_attention_heads,
+            tts_adapter_dropout=tts_adapter_dropout,
+            tts_adapter_attention_dropout=tts_adapter_attention_dropout,
+            boa_token_id=boa_token_id,
+            eoa_token_id=eoa_token_id,
+            llm_path=llm_path,
+            tie_audio_embeddings=tie_audio_embeddings,
+            **kwargs
+        )
