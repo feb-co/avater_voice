@@ -7,27 +7,28 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 class AvaterCache(Cache):
     """
-    A cache that grows dynamically as more tokens are generated. This is the default for Avater generative models.
-
-    It stores the three different cache:
-    1. Key and Value states as a list of tensors, one for each layer. The expected shape for each tensor is `[batch_size, num_heads, seq_len, head_dim]`.
+    Base, abstract class for all encoder-decoder caches. Can be used to hold combinations of self-attention and
+    cross-attention caches.
 
     Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, AutoModelForCausalLM, DynamicCache
+        >>> from transformers import AutoProcessor, AutoModelForCausalLM, DynamicCache, EncoderDecoderCache
 
-        >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B-Instruct")
-        >>> tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B-Instruct")
+        >>> model = AutoModelForCausalLM.from_pretrained("openai/whisper-small")
+        >>> processor = AutoProcessor.from_pretrained("openai/whisper-small")
 
-        >>> inputs = tokenizer(text="My name is Qwen2", return_tensors="pt")
+        >>> inputs = processor(audio=YOUR-AUDIO, return_tensors="pt")
 
-        >>> # Prepare a cache class and pass it to model's forward
-        >>> past_key_values = DynamicCache()
+        >>> # Prepare cache classes for encoder and decoder and pass it to model's forward
+        >>> self_attention_cache = DynamicCache()
+        >>> cross_attention_cache = DynamicCache()
+        >>> past_key_values = EncoderDecoderCache(self_attention_cache, cross_attention_cache)
         >>> outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
         >>> outputs.past_key_values # access cache filled with key/values from generation
-        DynamicCache()
+        EncoderDecoderCache()
         ```
+
     """
 
     def __init__(self, llm_attention_cache: Cache, self_attention_cache: Cache, cross_attention_cache: Cache) -> None:
@@ -68,6 +69,51 @@ class AvaterCache(Cache):
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
         # check if empty list because in case of static cache it will be a tensors and we can't check `if not torch.Tensor`
         return self.self_attention_cache.get_seq_length(layer_idx)
+    
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
+
+        Parameters:
+            key_states (`torch.Tensor`):
+                The new key states to cache.
+            value_states (`torch.Tensor`):
+                The new value states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+            cache_kwargs (`Dict[str, Any]`, `optional`):
+                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
+
+        Return:
+            A tuple containing the updated key and value states.
+        """
+        # # Update the number of seen tokens
+        # if layer_idx == 0:
+        #     self._seen_tokens += key_states.shape[-2]
+
+        # # Update the cache
+        # if len(self.key_cache) <= layer_idx:
+        #     # There may be skipped layers, fill them with empty lists
+        #     for _ in range(len(self.key_cache), layer_idx):
+        #         self.key_cache.append([])
+        #         self.value_cache.append([])
+        #     self.key_cache.append(key_states)
+        #     self.value_cache.append(value_states)
+        # elif len(self.key_cache[layer_idx]) == 0:  # fills previously skipped layers; checking for tensor causes errors
+        #     self.key_cache[layer_idx] = key_states
+        #     self.value_cache[layer_idx] = value_states
+        # else:
+        #     self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
+        #     self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+
+        # return self.key_cache[layer_idx], self.value_cache[layer_idx]
+        return key_states, value_states
 
     def reset(self):
         if hasattr(self.self_attention_cache, "reset"):

@@ -25,12 +25,12 @@ class AvaterTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         text_tokenizer_path,
+        audio_tokenizer_path,
         audio_special_token: Optional[Dict[str, Any]] = None,
         short_wait_string="<|SHORT_WAIT|>",
         long_wait_string="<|LONG_WAIT|>",
         audio_tokenizer="moshi_mimi",
         text_duration_token=5,
-        cpt_cache=".cache/",
         device="cpu",
         **kwargs
     ):
@@ -40,8 +40,8 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 " model use `tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)`"
             )
 
-        if not os.path.exists(cpt_cache):
-            os.mkdir(cpt_cache)
+        if not os.path.exists(audio_tokenizer_path):
+            os.mkdir(audio_tokenizer_path)
 
         self.init_kwargs = copy.deepcopy(kwargs)
 
@@ -58,20 +58,20 @@ class AvaterTokenizer(PreTrainedTokenizer):
             setattr(self, attr, None)
 
         # tokenizer init
-        self.cpt_cache = cpt_cache
+        self.audio_tokenizer_path = audio_tokenizer_path
         self.text_tokenizer_path = text_tokenizer_path
         self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
         try:
-            self.whisper_tokenizer = whisper.load_model("small").to(device)
+            self.whisper_tokenizer = whisper.load_model("small", download_root=audio_tokenizer_path).to(device)
         except:
             import ssl
             ssl._create_default_https_context = ssl._create_unverified_context
-            self.whisper_tokenizer = whisper.load_model("small").to(device)
+            self.whisper_tokenizer = whisper.load_model("small", download_root=audio_tokenizer_path).to(device)
         if audio_tokenizer == "moshi_mimi":
             from mimi import MimiTokenizer
             self.audio_tokenizer_type = audio_tokenizer
             self.audio_tokenizer = MimiTokenizer.load_from_checkpoint(
-                cpt_dir=cpt_cache,
+                cpt_dir=audio_tokenizer_path,
                 device=device
             )
             self.audio_duration_token = 13
@@ -361,6 +361,3 @@ class AvaterTokenizer(PreTrainedTokenizer):
                 new_text_token_threshold += 1
 
         return new_text_token_threshold
-
-    def audio_code_shift(self, input_ids, layer_idx):
-        return [input_id + layer_idx * (self.code_size+len(self.audio_special_token)) for input_id in input_ids]

@@ -40,13 +40,16 @@ logger = logging.get_logger(__name__)
 
 
 
-def apply_cross_attn_rotary_pos_emb(q, k, cos, sin, e_cos, e_sin, unsqueeze_dim=1):
+def apply_cross_attn_rotary_pos_emb(q, k, cos, sin, e_cos, e_sin, unsqueeze_dim=1, is_updated=False):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     e_cos = e_cos.unsqueeze(unsqueeze_dim)
     e_sin = e_sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * e_cos) + (rotate_half(k) * e_sin)
+    if not is_updated:
+        k_embed = (k * e_cos) + (rotate_half(k) * e_sin)
+    else:
+        k_embed = k
     return q_embed, k_embed
 
 
@@ -158,12 +161,17 @@ class TTSAdapterAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
         bsz, tgt_len, _ = hidden_states.size()
+        is_updated = past_key_values.is_updated.get(self.layer_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
-        if self.encoder_attn:
+        if self.encoder_attn and not is_updated:
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+        elif self.encoder_attn:
+            # reuse k,v, cross_attentions
+            key_states = past_key_values.cross_attention_cache.key_cache[self.layer_idx]
+            value_states = past_key_values.cross_attention_cache.value_cache[self.layer_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
@@ -172,7 +180,7 @@ class TTSAdapterAttention(nn.Module):
         if self.encoder_attn:
             cos, sin = position_embeddings
             e_cos, e_sin = encoder_position_embeddings
-            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin)
+            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin, is_updated=is_updated)
             cache_kwargs = {"sin": sin, "cos": cos, "e_sin": e_sin, "e_cos": e_cos, "cache_position": cache_position}
         else:
             cos, sin = position_embeddings
@@ -181,7 +189,11 @@ class TTSAdapterAttention(nn.Module):
 
         # Past Key Value
         if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if self.encoder_attn and not is_updated:
+                past_key_values.is_updated[self.layer_idx] = True
+                key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            elif not self.encoder_attn:
+                key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -353,12 +365,17 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
             )
         
         bsz, tgt_len, _ = hidden_states.size()
+        is_updated = past_key_values.is_updated.get(self.layer_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
-        if self.encoder_attn:
+        if self.encoder_attn and not is_updated:
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+        elif self.encoder_attn:
+            # reuse k,v, cross_attentions
+            key_states = past_key_values.cross_attention_cache.key_cache[self.layer_idx]
+            value_states = past_key_values.cross_attention_cache.value_cache[self.layer_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
@@ -367,7 +384,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         if self.encoder_attn:
             cos, sin = position_embeddings
             e_cos, e_sin = encoder_position_embeddings
-            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin)
+            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin, is_updated=is_updated)
             cache_kwargs = {"sin": sin, "cos": cos, "e_sin": e_sin, "e_cos": e_cos, "cache_position": cache_position}
         else:
             cos, sin = position_embeddings
@@ -376,7 +393,11 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
 
         # Past Key Value
         if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if self.encoder_attn and not is_updated:
+                past_key_values.is_updated[self.layer_idx] = True
+                key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            elif not self.encoder_attn:
+                key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -485,7 +506,7 @@ class TTSAdapterLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        
+
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -712,7 +733,12 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             use_cache = False
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            pos_bias = (
+                torch.arange(0, self.config.code_layers)
+                *
+                (self.config.code_size+self.config.audio_special_tokens)
+            ).view(1, self.config.code_layers, 1).to(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids+pos_bias)
             inputs_embeds = torch.sum(inputs_embeds, dim=1)
 
         # expand cache

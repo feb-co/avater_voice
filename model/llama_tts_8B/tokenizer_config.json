@@ -10,11 +10,11 @@
   "tokenizer_class": "AvaterTokenizer",
   "use_fast": false,
   "text_tokenizer_path": "/mnt/ceph/huggingface/Llama-3.1-8B",
+  "audio_tokenizer_path": "/mnt/ceph/huggingface/AvateAduio-tokenizer",
   "short_wait_string": "<|SHORT_WAIT|>",
   "long_wait_string": "<|LONG_WAIT|>",
   "audio_tokenizer": "moshi_mimi",
   "text_duration_token": 10,
-  "cpt_cache": ".cache/",
   "audio_special_token": {
     "boa_token": 2048,
     "eoa_token": 2049,

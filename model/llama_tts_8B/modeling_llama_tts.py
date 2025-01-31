@@ -41,7 +41,10 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
 
     def __repr__(self):
         return self.tts_adapter.__repr__()
-    
+
+    def get_encoder(self,):
+        return self.llm
+
     def load_llm_state_dict(self, llm_pretrained_model_name_or_path):
         archive_file, is_sharded = get_archive_file(llm_pretrained_model_name_or_path)
         if is_sharded:
@@ -113,7 +116,7 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
             encoder_outputs: CausalLMOutputWithPast = self.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                past_key_values=past_key_values.llm_attention_cache,
+                past_key_values=None,
                 inputs_embeds=inputs_embeds,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
@@ -123,7 +126,7 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
             )
             encoder_outputs_hidden_state = encoder_outputs.hidden_states[-1]
         else:
-            encoder_outputs_hidden_state = encoder_outputs[-1]
+            encoder_outputs_hidden_state = encoder_outputs.hidden_states[-1]
 
         if valid_tokens_pos is not None:
             batch_size, seq_len, h_dim = encoder_outputs_hidden_state.size()
@@ -133,7 +136,11 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
                 0, select_index
             ).contiguous().view(batch_size, -1, h_dim)
 
-        assert len(decoder_input_ids.size()) == 3, "decoder_input_ids shape must equal [bsz, code_layers, tgt_len]"
+        if len(decoder_input_ids.size()) == 2:
+            decoder_input_ids = decoder_input_ids.view(-1, self.config.code_layers, decoder_input_ids.size(-1))
+        else:
+            assert len(decoder_input_ids.size()) == 3, "decoder_input_ids shape must equal [bsz, code_layers, tgt_len]"
+
         bsz, code_layers, tgt_len = decoder_input_ids.size()
         decoder_outputs: AdapterModelOutputWithPastAndCrossAttentions = self.tts_adapter(
             input_ids=decoder_input_ids,
@@ -150,14 +157,15 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
 
         decoder_logits = decoder_outputs.logits.view(
             bsz, tgt_len, code_layers, -1
-        ).transpose(1,2).contiguous() # [bsz, code_layers, tgt_len, audio_vocab]
+        ).transpose(1,2).contiguous()
+        decoder_logits = decoder_logits.view(-1, tgt_len, decoder_logits.size(-1))# [bsz * code_layers, tgt_len, audio_vocab]
 
         # Loss
         loss = None
         if decoder_labels is not None:
             kwargs.pop("labels")
             loss = self.loss_function(
-                logits=decoder_logits.view(-1, tgt_len, decoder_logits.size(-1)),
+                logits=decoder_logits,
                 labels=decoder_labels.view(-1, tgt_len),
                 vocab_size=decoder_logits.size(-1),
                 **kwargs
@@ -166,11 +174,10 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
         return Seq2SeqCausalLMOutputWithCrossAttentions(
             loss=loss,
             encoder_logits=encoder_outputs.logits,
-            encoder_past_key_values=encoder_outputs.past_key_values,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
             decoder_logits=decoder_logits,
-            decoder_past_key_values=decoder_outputs.past_key_values,
+            past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
             decoder_attentions=decoder_outputs.attentions,
             cross_attentions=decoder_outputs.cross_attentions

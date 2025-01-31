@@ -3,7 +3,9 @@
   "temperature": 0.6,
   "top_p": 0.9,
   "_from_model_config": true,
-  "boa_token_id": 2049,
-  "eoa_token_id": 2050,
+  "bos_token_id": 128000,
+  "eos_token_id": 128001,
+  "boa_token_id": 2048,
+  "eoa_token_id": 2049,
   "transformers_version": "4.43.0.dev0"
 }

@@ -83,11 +83,10 @@ class Seq2SeqCausalLMOutputWithCrossAttentions(ModelOutput):
     """
     loss: Optional[torch.FloatTensor] = None
     encoder_logits: torch.FloatTensor = None
-    encoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     encoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     encoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
     decoder_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
-    decoder_past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     decoder_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     decoder_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
