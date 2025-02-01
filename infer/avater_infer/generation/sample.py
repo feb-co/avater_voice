@@ -121,7 +121,6 @@ def sample(
         next_token_logits = next_token_logits.to(input_ids.device)
 
         # pre-process distribution
-        print(input_ids, "---", flush=True)
         next_token_scores = logits_processor(input_ids, next_token_logits)
 
         # Store scores, attentions and hidden_states when required

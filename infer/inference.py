@@ -1,7 +1,8 @@
 import sys
-
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from audiotools import AudioSignal
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from transformers.cache_utils import DynamicCache
 
 from avater_infer.models.patcher import patch_model, patch_init
@@ -9,17 +10,32 @@ from avater_infer.models.llama.configuration_voice import LlamaVoiceConfig
 from avater_infer.cache_utils import AvaterCache
 
 
+audio_generation_config = {
+  "do_sample": True,
+  "temperature": 0.1,
+  "top_p": 0.1,
+  "_from_model_config": True,
+  "bos_token_id": 128000,
+  "eos_token_id": 2049,
+  "decoder_start_token_id": 2048,
+  "output_hidden_states": True,
+  "max_length": 512
+}
+
+
+
 def load_model_tokenizer(model_path):
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    config = LlamaVoiceConfig.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, config=config, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
+    model_config = LlamaVoiceConfig.from_pretrained(model_path)
+    generation_config = GenerationConfig.from_dict(audio_generation_config)
+    model = AutoModelForCausalLM.from_pretrained(model_path, config=model_config, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
 
     patch_init(model, tokenizer)
     model, tokenizer = patch_model(model, tokenizer)
-    return tokenizer, model
+    return tokenizer, model, generation_config
 
 
-def inference_tts(model, tokenizer, input_text):
+def inference_tts(model, tokenizer, generation_config, input_text):
     prefix_text_template = """<|start_header_id|>system<|end_header_id|>
 
 You are Ray Dalio, and you are chatting with the user via voice.<|eot_id|><|start_header_id|>user<|end_header_id|>
@@ -27,7 +43,7 @@ You are Ray Dalio, and you are chatting with the user via voice.<|eot_id|><|star
 <|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 """
-    text_template = """{content}<|eot_id|>"""
+    text_template = """{content}<|end_of_text|>"""
 
     # init encoder input
     prefix_input_ids = tokenizer.encode(prefix_text_template)
@@ -51,14 +67,24 @@ You are Ray Dalio, and you are chatting with the user via voice.<|eot_id|><|star
         "valid_tokens_pos": valid_tokens_pos.to(model.device),
         "decoder_input_ids": decoder_input_ids.to(model.device),
         "past_key_values": past_key_values,
+        "encoder_decoder_attention_mask": torch.ones_like(valid_tokens_pos).to(model.device)
     }
 
     # generate
-    model.generate(**inputs, max_length=32)
+    outputs = model.generate(**inputs, generation_config=generation_config)
+    audio_codes = outputs[:, 1:-1]
+
+    audio = tokenizer.decode(audio_codes.view(1, audio_codes.size(0), audio_codes.size(-1)))
+    audio = AudioSignal(audio, sample_rate=24000)
+    audio.to("cpu")
+    audio.write("/mnt/ceph/licheng/test.wav")
 
 
 if __name__ == "__main__":
     model_name_and_path = sys.argv[1]
 
-    tokenizer, model = load_model_tokenizer(model_name_and_path)
-    inference_tts(model, tokenizer, "hi <|LONG_WAIT|> I am Ray Dalio.")
+    tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
+    inference_tts(
+        model, tokenizer, generation_config,
+        "hi, I am Ray Dalio. who are you"
+    )

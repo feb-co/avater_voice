@@ -333,6 +333,14 @@ class AvaterTokenizer(PreTrainedTokenizer):
 
         return token_ids, audio_features, audio_pos
 
+    def decode(
+        self,
+        audio_codes,
+    ):
+        with torch.no_grad():
+            audio = self.audio_tokenizer.decode(audio_codes)
+        return audio
+
     def convert_t2a_attention_mask(self, text_tokens: list[int], audio_tokens: list):
         audio_length = len(audio_tokens[0])
         text_length = len(text_tokens)
