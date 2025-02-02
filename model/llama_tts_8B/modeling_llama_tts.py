@@ -23,6 +23,8 @@ logger = logging.get_logger(__name__)
 
 
 class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
+    config_class = LlamaTTSConfig
+
     def __init__(self, config: LlamaTTSConfig):
         super().__init__(config)
         

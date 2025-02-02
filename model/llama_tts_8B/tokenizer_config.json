@@ -9,7 +9,7 @@
   "add_prefix_space": false,
   "tokenizer_class": "AvaterTokenizer",
   "use_fast": false,
-  "text_tokenizer_path": "/mnt/ceph/huggingface/Llama-3.1-8B",
+  "text_tokenizer_path": "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct",
   "audio_tokenizer_path": "/mnt/ceph/huggingface/AvateAduio-tokenizer",
   "short_wait_string": "<|SHORT_WAIT|>",
   "long_wait_string": "<|LONG_WAIT|>",

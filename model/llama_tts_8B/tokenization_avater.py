@@ -128,7 +128,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
             "long_wait_string": self.long_wait_string,
             "audio_tokenizer": self.audio_tokenizer_type,
             "text_duration_token": self.text_duration_token,
-            "cpt_cache": self.cpt_cache,
+            "audio_tokenizer_path": self.audio_tokenizer_path,
             "audio_special_token": self.audio_special_token,
             "device": self.device
         })
@@ -203,22 +203,7 @@ class AvaterTokenizer(PreTrainedTokenizer):
                         raise ValueError(f"Invalid padding strategy: {padding_side}")
 
                     batch_outputs[key].append(outputs)
-            elif key in ("decoder_input_ids",):
-                max_length = max([len(item[0]) for item in values])
-                for value in values:
-                    outputs = []
-                    difference = max_length - len(value[0])
-                    for layer_idx, out in enumerate(value):
-                        if padding_side == "right":
-                            out = out + self.audio_code_shift([pad_token], layer_idx) * difference
-                        elif padding_side == "left":
-                            out = self.audio_code_shift([pad_token], layer_idx) * difference + out
-                        else:
-                            raise ValueError(f"Invalid padding strategy:{padding_side}")
-
-                        outputs.append(out)
-                    batch_outputs[key].append(outputs)
-            elif key in ("decoder_labels", ):
+            elif key in ("decoder_input_ids", "decoder_labels",):
                 max_length = max([len(item[0]) for item in values])
                 for layer_idx, value in enumerate(values):
                     outputs = []
@@ -299,9 +284,9 @@ class AvaterTokenizer(PreTrainedTokenizer):
                             else:
                                 codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
                 else:
-                    codes = self.audio_tokenizer.encode(audio_signal.audio_data)[0]
+                    codes = self.audio_tokenizer.encode(audio_signal.audio_data.to(self.device))[0]
+                    codes = codes.tolist()
                     for idx in range(len(codes)):
-                        codes[idx] = codes[idx].tolist()
                         if add_audio_special_tokens:
                             if idx == 0:
                                 codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
@@ -335,9 +320,12 @@ class AvaterTokenizer(PreTrainedTokenizer):
 
     def decode(
         self,
-        audio_codes,
+        audio_codes: Optional[Union[List, torch.LongTensor]],
     ):
         with torch.no_grad():
+            if isinstance(audio_codes, list):
+                audio_codes = torch.LongTensor(audio_codes).to(self.device)
+                audio_codes = audio_codes.view(1, audio_codes.size(0), audio_codes.size(-1))
             audio = self.audio_tokenizer.decode(audio_codes)
         return audio
 

@@ -26,9 +26,9 @@ audio_generation_config = {
 
 def load_model_tokenizer(model_path):
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    model_config = LlamaVoiceConfig.from_pretrained(model_path)
+    # model_config = LlamaVoiceConfig.from_pretrained(model_path)
     generation_config = GenerationConfig.from_dict(audio_generation_config)
-    model = AutoModelForCausalLM.from_pretrained(model_path, config=model_config, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
 
     patch_init(model, tokenizer)
     model, tokenizer = patch_model(model, tokenizer)
@@ -38,15 +38,19 @@ def load_model_tokenizer(model_path):
 def inference_tts(model, tokenizer, generation_config, input_text):
     prefix_text_template = """<|start_header_id|>system<|end_header_id|>
 
-You are Ray Dalio, and you are chatting with the user via voice.<|eot_id|><|start_header_id|>user<|end_header_id|>
+You are a helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
 
-<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+Please repeat the following user's input (which may contain the two special symbols <|SHORT_WAIT|> and <|LONG_WAIT|>):
+
+```
+{content}
+```<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 """
     text_template = """{content}<|end_of_text|>"""
 
     # init encoder input
-    prefix_input_ids = tokenizer.encode(prefix_text_template)
+    prefix_input_ids = tokenizer.encode(prefix_text_template.format(content=input_text))
     text_input_ids = tokenizer.encode(text_template.format(content=input_text), add_special_tokens=False)
     input_ids = torch.LongTensor([prefix_input_ids+text_input_ids])
     valid_tokens_pos=torch.arange(len(prefix_input_ids), len(prefix_input_ids)+len(text_input_ids)).view(1, -1).to(input_ids)
@@ -75,7 +79,7 @@ You are Ray Dalio, and you are chatting with the user via voice.<|eot_id|><|star
     audio_codes = outputs[:, 1:-1]
 
     audio = tokenizer.decode(audio_codes.view(1, audio_codes.size(0), audio_codes.size(-1)))
-    audio = AudioSignal(audio, sample_rate=24000)
+    audio = AudioSignal(audio, sample_rate=16000)
     audio.to("cpu")
     audio.write("/mnt/ceph/licheng/test.wav")
 
@@ -86,5 +90,5 @@ if __name__ == "__main__":
     tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
     inference_tts(
         model, tokenizer, generation_config,
-        "hi, I am Ray Dalio. who are you"
+        "Hi, I am Ray Dalio. How are you?"
     )
