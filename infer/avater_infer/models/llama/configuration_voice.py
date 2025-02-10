@@ -17,6 +17,7 @@ class LlamaVoiceConfig(LlamaConfig):
         tts_adapter_hidden_size=1024,
         tts_adapter_intermediate_size=2744,
         tts_adapter_attention_heads=16,
+        block_step=1,
         tts_adapter_dropout=0.0,
         tts_adapter_attention_dropout=0.0,
         boa_token_id=1,
@@ -35,10 +36,13 @@ class LlamaVoiceConfig(LlamaConfig):
         self.tts_adapter_attention_heads = tts_adapter_attention_heads
         self.tts_adapter_dropout = tts_adapter_dropout
         self.tts_adapter_attention_dropout = tts_adapter_attention_dropout
-        self.scale_embedding = 1.0
         self.boa_token_id = boa_token_id
         self.eoa_token_id = eoa_token_id
         self.tie_audio_embeddings = tie_audio_embeddings
+
+        self.scale_embedding = 1.0
+        self.block_step = block_step
+        self.block_size = code_layers//self.block_step
 
         self.llm_path = llm_path
         if llm_path is not None:

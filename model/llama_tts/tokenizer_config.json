@@ -1,16 +1,14 @@
 {
-  "name_or_path": "avater-tokenizer",
+  "name_or_path": "LlamaTTSTokenizer",
   "auto_map": {
     "AutoTokenizer": [
-      "tokenization_avater.AvaterTokenizer",
+      "tokenization_llama_tts.LlamaTTSTokenizer",
       null
       ]
   },
   "add_prefix_space": false,
-  "tokenizer_class": "AvaterTokenizer",
+  "tokenizer_class": "LlamaTTSTokenizer",
   "use_fast": false,
-  "text_tokenizer_path": "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct",
-  "audio_tokenizer_path": "/mnt/ceph/huggingface/AvateAduio-tokenizer",
   "short_wait_string": "<|SHORT_WAIT|>",
   "long_wait_string": "<|LONG_WAIT|>",
   "audio_tokenizer": "moshi_mimi",

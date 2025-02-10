@@ -1,6 +1,13 @@
+import os
 import sys
 import torch
 from audiotools import AudioSignal
+
+
+os.environ["AVATER_LLM_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
+os.environ["AVATER_TEXT_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
+os.environ["AVATER_AUDIO_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/AvateAduio-tokenizer"
+
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from transformers.cache_utils import DynamicCache
@@ -90,5 +97,5 @@ if __name__ == "__main__":
     tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
     inference_tts(
         model, tokenizer, generation_config,
-        "Hi, I am Ray Dalio. How are you?"
+        "Hi, I am Ray Dalio. Who are you?"
     )

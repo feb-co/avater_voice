@@ -1,7 +1,6 @@
 """PyTorch LLaMA TTS model."""
 
 import math
-
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -19,7 +18,6 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.models.llama.modeling_llama import (
     apply_rotary_pos_emb,
     repeat_kv,
-    rotate_half,
     ACT2FN,
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
@@ -40,17 +38,12 @@ logger = logging.get_logger(__name__)
 
 
 
-def apply_cross_attn_rotary_pos_emb(q, k, cos, sin, e_cos, e_sin, unsqueeze_dim=1, is_updated=False):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    e_cos = e_cos.unsqueeze(unsqueeze_dim)
-    e_sin = e_sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    if not is_updated:
-        k_embed = (k * e_cos) + (rotate_half(k) * e_sin)
-    else:
-        k_embed = k
-    return q_embed, k_embed
+def Linear(in_features, out_features, bias=True):
+    m = nn.Linear(in_features, out_features, bias)
+    nn.init.xavier_uniform_(m.weight)
+    if bias:
+        nn.init.constant_(m.bias, 0.0)
+    return m
 
 
 class AdapterAudioEmbedding(nn.Embedding):
@@ -64,6 +57,17 @@ class AdapterAudioEmbedding(nn.Embedding):
 
     def forward(self, input_ids: torch.Tensor):
         return super().forward(input_ids) * self.embed_scale
+
+
+class AdapterHead(nn.Module):
+    def __init__(self, config: LlamaVoiceConfig):
+        super().__init__()
+        self.head_block = nn.ModuleList([])
+        for _ in range(config.block_size):
+            self.head_block.append(nn.Linear(config.tts_adapter_hidden_size, config.audio_vocab_size//config.block_size, bias=False))
+
+    def forward(self, block_idx, hidden_states: torch.Tensor):
+        return self.head_block[block_idx](hidden_states)
 
 
 class TTSAdapterMLP(nn.Module):
@@ -103,10 +107,11 @@ class TTSAdapterMLP(nn.Module):
 class TTSAdapterAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaVoiceConfig, layer_idx: Optional[int] = None, encoder_attn=False, is_causal: bool = False):
+    def __init__(self, config: LlamaVoiceConfig, layer_idx: Optional[int] = None, block_idx: Optional[int] = None, encoder_attn=False, is_causal: bool = False):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.block_idx = block_idx
         self.encoder_attn = encoder_attn
         self.is_causal = is_causal
         
@@ -153,36 +158,31 @@ class TTSAdapterAttention(nn.Module):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        encoder_position_embeddings: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
+        attn_idx = self.layer_idx+self.block_idx
         bsz, tgt_len, _ = hidden_states.size()
-        is_updated = past_key_values.is_updated.get(self.layer_idx) if past_key_values else False
+        is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
         if self.encoder_attn and not is_updated:
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
         elif self.encoder_attn:
             # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[self.layer_idx]
-            value_states = past_key_values.cross_attention_cache.value_cache[self.layer_idx]
+            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx].to(query_states)
+            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx].to(query_states)
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
 
         # Rotary Embedding
-        if self.encoder_attn:
-            cos, sin = position_embeddings
-            e_cos, e_sin = encoder_position_embeddings
-            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin, is_updated=is_updated)
-            cache_kwargs = {"sin": sin, "cos": cos, "e_sin": e_sin, "e_cos": e_cos, "cache_position": cache_position}
-        else:
+        if not self.encoder_attn:
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -190,10 +190,15 @@ class TTSAdapterAttention(nn.Module):
         # Past Key Value
         if past_key_values is not None:
             if self.encoder_attn and not is_updated:
-                past_key_values.is_updated[self.layer_idx] = True
-                key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
+                past_key_values.is_updated[attn_idx] = True
+                key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
-                key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
+                key_states, value_states = past_key_values.self_attention_cache.update(
+                    key_states,
+                    value_states,
+                    attn_idx,
+                    cache_kwargs
+                )
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -245,38 +250,47 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        encoder_position_embeddings: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         output_attentions = False
-        bsz, q_len, _ = hidden_states.size()
+        attn_idx = self.layer_idx+self.block_idx
+        bsz, tgt_len, _ = hidden_states.size()
+        is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
-        query_states = self._shape(self.q_proj(hidden_states), q_len, bsz, self.num_heads)
-        if self.encoder_attn:
-            key_states = self._shape(self.k_proj(key_value_states), q_len, bsz, self.num_key_value_heads)
-            value_states = self._shape(self.v_proj(key_value_states), q_len, bsz, self.num_key_value_heads)
+        query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
+        if self.encoder_attn and not is_updated:
+            key_states = self._shape(self.k_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads).to(query_states)
+            value_states = self._shape(self.v_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads).to(query_states)
+        elif self.encoder_attn:
+            # reuse k,v, cross_attentions
+            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx].to(query_states)
+            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx].to(query_states)
         else:
-            key_states = self._shape(self.k_proj(hidden_states), q_len, bsz, self.num_key_value_heads)
-            value_states = self._shape(self.v_proj(hidden_states), q_len, bsz, self.num_key_value_heads)
+            key_states = self._shape(self.k_proj(hidden_states), tgt_len, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(hidden_states), tgt_len, bsz, self.num_key_value_heads)
 
         # Rotary Embedding
-        if self.encoder_attn:
-            cos, sin = position_embeddings
-            e_cos, e_sin = encoder_position_embeddings
-            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin)
-            cache_kwargs = {"sin": sin, "cos": cos, "e_sin": e_sin, "e_cos": e_cos, "cache_position": cache_position}
-        else:
+        if not self.encoder_attn:
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
         # Past Key Value
         if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if self.encoder_attn and not is_updated:
+                past_key_values.is_updated[attn_idx] = True
+                key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
+            elif not self.encoder_attn:
+                key_states, value_states = past_key_values.self_attention_cache.update(
+                    key_states,
+                    value_states,
+                    attn_idx,
+                    cache_kwargs
+                )
 
         # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
         # to be able to avoid many of these transpose/reshape/view.
@@ -317,14 +331,14 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
             key_states,
             value_states,
             attention_mask,
-            q_len,
+            tgt_len,
             dropout=dropout_rate,
             sliding_window=getattr(self, "sliding_window", None),
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
             is_causal=self.is_causal,
         )
 
-        attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
+        attn_output = attn_output.reshape(bsz, tgt_len, -1).contiguous()
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -340,7 +354,6 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        encoder_position_embeddings: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
@@ -357,36 +370,31 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
                 key_value_states=key_value_states,
                 attention_mask=attention_mask,
                 position_embeddings=position_embeddings,
-                encoder_position_embeddings=encoder_position_embeddings,
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position
             )
-        
+
+        attn_idx = self.layer_idx+self.block_idx
         bsz, tgt_len, _ = hidden_states.size()
-        is_updated = past_key_values.is_updated.get(self.layer_idx) if past_key_values else False
+        is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
         if self.encoder_attn and not is_updated:
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
         elif self.encoder_attn:
             # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[self.layer_idx]
-            value_states = past_key_values.cross_attention_cache.value_cache[self.layer_idx]
+            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx].to(query_states)
+            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx].to(query_states)
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
 
         # Rotary Embedding
-        if self.encoder_attn:
-            cos, sin = position_embeddings
-            e_cos, e_sin = encoder_position_embeddings
-            query_states, key_states = apply_cross_attn_rotary_pos_emb(query_states, key_states, cos, sin, e_cos, e_sin, is_updated=is_updated)
-            cache_kwargs = {"sin": sin, "cos": cos, "e_sin": e_sin, "e_cos": e_cos, "cache_position": cache_position}
-        else:
+        if not self.encoder_attn:
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -394,10 +402,15 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         # Past Key Value
         if past_key_values is not None:
             if self.encoder_attn and not is_updated:
-                past_key_values.is_updated[self.layer_idx] = True
-                key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
+                past_key_values.is_updated[attn_idx] = True
+                key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
-                key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, self.layer_idx, cache_kwargs)
+                key_states, value_states = past_key_values.self_attention_cache.update(
+                    key_states,
+                    value_states,
+                    attn_idx,
+                    cache_kwargs
+                )
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -450,25 +463,29 @@ TTS_ADAPTER_ATTENTION_CLASSES = {
 }
 
 
-class TTSAdapterLayer(nn.Module):
-    def __init__(self, config: LlamaVoiceConfig, layer_idx: int):
+class TTSAdapterBlock(nn.Module):
+    def __init__(self, config: LlamaVoiceConfig, block_idx: int, layer_idx: int):
         super().__init__()
+        self.block_idx = block_idx
         self.dropout = config.tts_adapter_dropout
         self.embed_dim = config.tts_adapter_hidden_size
 
         self.self_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation](
             config=config,
             layer_idx=layer_idx,
+            block_idx=block_idx,
             is_causal=True,
         )
         self.self_attn_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
-        self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation if config._attn_implementation != "flash_attention_2" else "sdpa"](
-            config=config,
-            layer_idx=layer_idx,
-            encoder_attn=True,
-        )
-        self.encoder_attn_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
+        if block_idx == 0:
+            self.encoder_attn = TTS_ADAPTER_ATTENTION_CLASSES[config._attn_implementation if config._attn_implementation != "flash_attention_2" else "sdpa"](
+                config=config,
+                layer_idx=layer_idx,
+                block_idx=block_idx,
+                encoder_attn=True,
+            )
+            self.encoder_attn_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
         self.mlp = TTSAdapterMLP(config)
         self.final_layer_norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
@@ -483,7 +500,64 @@ class TTSAdapterLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = True,
         position_embeddings: Optional[torch.Tensor] = None,
-        encoder_position_embeddings: Optional[torch.Tensor] = None,
+    ):
+        # Self Attention
+        residual = hidden_states
+        hidden_states = self.self_attn_layer_norm(hidden_states)
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+            past_key_values=past_key_values,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+        hidden_states = residual + hidden_states
+
+        # Cross-Attention Block
+        if self.block_idx == 0:
+            residual = hidden_states
+            hidden_states = self.encoder_attn_layer_norm(hidden_states)
+            hidden_states, cross_attn_weights, present_key_value = self.encoder_attn(
+                hidden_states=hidden_states,
+                key_value_states=encoder_hidden_states,
+                attention_mask=encoder_attention_mask,
+                output_attentions=output_attentions,
+                past_key_values=present_key_value,
+            )
+            hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+            hidden_states = residual + hidden_states
+        else:
+            cross_attn_weights = None
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        
+        return hidden_states, self_attn_weights, cross_attn_weights, present_key_value
+
+
+class TTSAdapterLayer(nn.Module):
+    def __init__(self, config: LlamaVoiceConfig, layer_idx: int):
+        super().__init__()
+        self.mlp_block = nn.ModuleList([])
+        for block_idx in range(config.block_size):
+            self.mlp_block.append(TTSAdapterBlock(config, block_idx, layer_idx))
+
+    def forward(
+        self,
+        block_idx: int,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: Optional[bool] = False,
+        use_cache: Optional[bool] = True,
+        position_embeddings: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -502,44 +576,16 @@ class TTSAdapterLayer(nn.Module):
                 Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
                 with `head_dim` being the embedding dimension of each attention head.
         """
-        # Self Attention
-        residual = hidden_states
-
-        hidden_states = self.self_attn_layer_norm(hidden_states)
-
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_embeddings=position_embeddings,
-            past_key_values=past_key_values,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
+        hidden_states, self_attn_weights, cross_attn_weights, present_key_value = self.mlp_block[block_idx](
+            hidden_states,
+            attention_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            past_key_values,
+            output_attentions,
+            use_cache,
+            position_embeddings
         )
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
-
-        # Cross-Attention Block
-        residual = hidden_states
-
-        hidden_states = self.encoder_attn_layer_norm(hidden_states)
-
-        hidden_states, cross_attn_weights, present_key_value = self.encoder_attn(
-            hidden_states=hidden_states,
-            key_value_states=encoder_hidden_states,
-            attention_mask=encoder_attention_mask,
-            position_embeddings=position_embeddings,
-            encoder_position_embeddings=encoder_position_embeddings,
-            output_attentions=output_attentions,
-            past_key_values=present_key_value,
-        )
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
 
@@ -595,7 +641,8 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         self.layers = nn.ModuleList(
             [TTSAdapterLayer(config, layer_idx) for layer_idx in range(config.tts_adapter_hidden_layers)]
         )
-        self.adapter_head = nn.Linear(config.tts_adapter_hidden_size, config.audio_vocab_size, bias=False)
+        # self.adapter_head = nn.Linear(config.tts_adapter_hidden_size, config.audio_vocab_size, bias=False)
+        self.adapter_head = AdapterHead(config)
 
         self.norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
@@ -739,30 +786,18 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
                 (self.config.code_size+self.config.audio_special_tokens)
             ).view(1, self.config.code_layers, 1).to(input_ids)
             inputs_embeds = self.embed_tokens(input_ids+pos_bias)
-            inputs_embeds = torch.sum(inputs_embeds, dim=1)
 
         # expand cache
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         # expand posistion
         cache_position = torch.arange(
-            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[2], device=inputs_embeds.device
         )
         position_ids = cache_position.unsqueeze(0)
-        encoder_position_ids = torch.arange(0, encoder_hidden_states.shape[1], device=encoder_hidden_states.device).unsqueeze(0)
-
-        # expand attention mask
-        attention_mask, encoder_attention_mask = self._update_adapter_attention_mask(
-            inputs_embeds, past_seen_tokens, encoder_hidden_states, attention_mask, encoder_attention_mask, output_attentions
-        )
 
         # dropout
-        hidden_states = inputs_embeds
-        hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        encoder_position_embeddings = self.rotary_emb(encoder_hidden_states, encoder_position_ids)
+        inputs_embeds = nn.functional.dropout(inputs_embeds, p=self.dropout, training=self.training)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -770,56 +805,72 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
         next_decoder_cache = None
 
-        for idx, decoder_layer in enumerate(self.layers):
+        hidden_states = None
+        logits = []
+        for block_idx in range(self.config.block_size):
+            inputs_embeds_block = inputs_embeds[:, block_idx*self.config.block_step:(block_idx+1)*self.config.block_step, :, :].sum(dim=1)
+            if hidden_states is None:
+                # expand attention mask
+                attention_mask, encoder_attention_mask = self._update_adapter_attention_mask(
+                    inputs_embeds, past_seen_tokens, encoder_hidden_states, attention_mask, encoder_attention_mask, output_attentions
+                )
+                hidden_states = inputs_embeds_block
+            else:
+                hidden_states = hidden_states.to(inputs_embeds_block) + inputs_embeds_block
+
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+            for idx, decoder_layer in enumerate(self.layers):
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+
+                if self.gradient_checkpointing and self.training:
+                    layer_outputs = self._gradient_checkpointing_func(
+                        decoder_layer.__call__,
+                        block_idx,
+                        hidden_states,
+                        attention_mask,
+                        encoder_hidden_states,
+                        encoder_attention_mask,
+                        None,
+                        output_attentions,
+                        use_cache,
+                        position_embeddings,
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        block_idx,
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_attention_mask=encoder_attention_mask,
+                        past_key_values=past_key_values,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        position_embeddings=position_embeddings,
+                    )
+                hidden_states = layer_outputs[0]
+
+                if use_cache:
+                    next_decoder_cache = layer_outputs[3 if output_attentions else 1]
+
+                if output_attentions:
+                    all_self_attns += (layer_outputs[1],)
+
+                    if encoder_hidden_states is not None:
+                        all_cross_attentions += (layer_outputs[2],)
+
+            hidden_states = self.norm(hidden_states)
+
+            # add hidden states from the last decoder layer
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    None,
-                    output_attentions,
-                    use_cache,
-                    position_embeddings,
-                    encoder_position_embeddings
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask,
-                    past_key_values=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    position_embeddings=position_embeddings,
-                    encoder_position_embeddings=encoder_position_embeddings
-                )
-            hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_decoder_cache = layer_outputs[3 if output_attentions else 1]
-
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
-
-                if encoder_hidden_states is not None:
-                    all_cross_attentions += (layer_outputs[2],)
-
-        hidden_states = self.norm(hidden_states)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+            # Logits
+            logits.append(self.adapter_head(block_idx, hidden_states))
 
         next_cache = next_decoder_cache if use_cache else None
 
-        # Logits
-        logits = self.adapter_head(hidden_states)
+        logits = torch.cat(logits, dim=-1)
         logits = logits.float()
 
         if not return_dict:

@@ -13,6 +13,10 @@ from transformers.dynamic_module_utils import custom_object_save
 from transformers import AutoTokenizer
 
 
+TEXT_TOKENIZER_PATH = os.getenv("AVATER_TEXT_TOKENIZER_PATH", None)
+AUDIO_TOKENIZER_PATH = os.getenv("AVATER_AUDIO_TOKENIZER_PATH", None)
+
+
 def load_whisper_audio(path):
     audio = whisper.load_audio(path)
     duration_ms = (len(audio) / 16000) * 1000
@@ -21,11 +25,9 @@ def load_whisper_audio(path):
     return mel, int(duration_ms / 20) + 1
 
 
-class AvaterTokenizer(PreTrainedTokenizer):
+class LlamaVoiceTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
-        text_tokenizer_path,
-        audio_tokenizer_path,
         audio_special_token: Optional[Dict[str, Any]] = None,
         short_wait_string="<|SHORT_WAIT|>",
         long_wait_string="<|LONG_WAIT|>",
@@ -34,14 +36,16 @@ class AvaterTokenizer(PreTrainedTokenizer):
         device="cpu",
         **kwargs
     ):
-        if not os.path.isdir(text_tokenizer_path):
+        if not os.path.isdir(TEXT_TOKENIZER_PATH):
             raise ValueError(
-                f"Can't find a text tokenizer file at path '{text_tokenizer_path}'. To load the vocabulary from a Google pretrained"
+                f"Can't find a text tokenizer file at path '{TEXT_TOKENIZER_PATH}'. To load the vocabulary from a Google pretrained"
                 " model use `tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)`"
             )
 
-        if not os.path.exists(audio_tokenizer_path):
-            os.mkdir(audio_tokenizer_path)
+        if not os.path.isdir(AUDIO_TOKENIZER_PATH):
+            raise ValueError(
+                f"Can't find a audio tokenizer file at path '{AUDIO_TOKENIZER_PATH}'."
+            )
 
         self.init_kwargs = copy.deepcopy(kwargs)
 
@@ -57,21 +61,23 @@ class AvaterTokenizer(PreTrainedTokenizer):
         for attr in self.SPECIAL_TOKENS_ATTRIBUTES:
             setattr(self, attr, None)
 
-        # tokenizer init
-        self.audio_tokenizer_path = audio_tokenizer_path
-        self.text_tokenizer_path = text_tokenizer_path
-        self.text_tokenizer = AutoTokenizer.from_pretrained(text_tokenizer_path)
+        # text tokenizer init
+        self.text_tokenizer = AutoTokenizer.from_pretrained(TEXT_TOKENIZER_PATH)
+
+        # audio encoder init
         try:
-            self.whisper_tokenizer = whisper.load_model("small", download_root=audio_tokenizer_path).to(device)
+            self.whisper_tokenizer = whisper.load_model("small", download_root=AUDIO_TOKENIZER_PATH).to(device)
         except:
             import ssl
             ssl._create_default_https_context = ssl._create_unverified_context
-            self.whisper_tokenizer = whisper.load_model("small", download_root=audio_tokenizer_path).to(device)
+            self.whisper_tokenizer = whisper.load_model("small", download_root=AUDIO_TOKENIZER_PATH).to(device)
+
+        # audio tokenizer init
         if audio_tokenizer == "moshi_mimi":
             from mimi import MimiTokenizer
             self.audio_tokenizer_type = audio_tokenizer
             self.audio_tokenizer = MimiTokenizer.load_from_checkpoint(
-                cpt_dir=audio_tokenizer_path,
+                cpt_dir=AUDIO_TOKENIZER_PATH,
                 device=device
             )
             self.audio_duration_token = 13
@@ -123,12 +129,10 @@ class AvaterTokenizer(PreTrainedTokenizer):
             "name_or_path": "avater-tokenizer",
             "add_prefix_space": False,
             "use_fast": False,
-            "text_tokenizer_path": self.text_tokenizer_path,
             "short_wait_string": self.short_wait_string,
             "long_wait_string": self.long_wait_string,
             "audio_tokenizer": self.audio_tokenizer_type,
             "text_duration_token": self.text_duration_token,
-            "audio_tokenizer_path": self.audio_tokenizer_path,
             "audio_special_token": self.audio_special_token,
             "device": self.device
         })

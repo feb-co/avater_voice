@@ -8,6 +8,7 @@
       "AutoModelForCausalLM": "modeling_llama_tts.LlamaTTSForCausalLM"
     },
     "audio_special_tokens": 8,
+    "block_step": 1,
     "code_size": 2048,
     "code_layers": 8,
     "tts_adapter_hidden_layers": 12,
@@ -18,6 +19,6 @@
     "tts_adapter_attention_dropout": 0.0,
     "boa_token_id": 2048,
     "eoa_token_id": 2049,
-    "llm_path": "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct",
-    "tie_audio_embeddings": false
+    "tie_audio_embeddings": false,
+    "torch_dtype": "bfloat16"
 }
