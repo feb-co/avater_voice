@@ -72,6 +72,7 @@ def sample(
     max_length = generation_config.max_length
     has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
     do_sample = generation_config.do_sample
+    voice_tokenizer = model_kwargs["voice_tokenizer"]
 
     # init attention / hidden states / scores tuples
     scores = () if (return_dict_in_generate and output_scores) else None
@@ -98,6 +99,8 @@ def sample(
     ):
         # prepare model inputs
         model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+        encoder_decoder_attention_mask = torch.LongTensor([voice_tokenizer.convert_t2a_attention_mask(model_kwargs["text_input_ids"], input_ids, remove_assert=True)]).to(self.device)
+        model_inputs["encoder_decoder_attention_mask"] = encoder_decoder_attention_mask[:, -1:, :]
 
         # prepare variable output controls (note: some models won't accept all output controls)
         model_inputs.update({"output_attentions": output_attentions} if output_attentions else {})
@@ -157,6 +160,9 @@ def sample(
 
         # update generated ids, model inputs, and length for next step
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+        if (input_ids[:, -1] == 2049).any():
+            input_ids[:, -1] = 2049
+
         if streamer is not None:
             streamer.put(next_tokens.cpu())
 

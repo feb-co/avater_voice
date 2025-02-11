@@ -5,6 +5,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from transformers.generation import GenerationMixin
 
 from ..generation.sample import sample
+from ..generation.utils import validate_model_kwargs
 
 
 def patch_model(model: "PreTrainedModel", tokenizer: "PreTrainedTokenizer"):
@@ -16,4 +17,5 @@ def patch_model(model: "PreTrainedModel", tokenizer: "PreTrainedTokenizer"):
 
 
 def patch_init(model: "PreTrainedModel", tokenizer: "PreTrainedTokenizer"):
+    GenerationMixin._validate_model_kwargs = validate_model_kwargs
     GenerationMixin._sample = sample

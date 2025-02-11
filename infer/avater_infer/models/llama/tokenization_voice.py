@@ -333,7 +333,7 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
             audio = self.audio_tokenizer.decode(audio_codes)
         return audio
 
-    def convert_t2a_attention_mask(self, text_tokens: list[int], audio_tokens: list):
+    def convert_t2a_attention_mask(self, text_tokens: list[int], audio_tokens: list, remove_assert=False):
         audio_length = len(audio_tokens[0])
         text_length = len(text_tokens)
 
@@ -345,7 +345,8 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
             text_token_threshold = self.get_complete_phrase(text_tokens, text_token_threshold)
             attention_mask[audio_idx][:text_token_threshold] = 1
 
-        assert text_token_threshold >= text_length, "audio_tokens need cover text_tokens!"
+        if not remove_assert:
+            assert text_token_threshold >= text_length, "audio_tokens need cover text_tokens!"
 
         return attention_mask.tolist()
 

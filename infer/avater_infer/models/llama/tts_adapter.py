@@ -164,19 +164,19 @@ class TTSAdapterAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
-        attn_idx = self.layer_idx+self.block_idx
+        attn_idx = self.layer_idx + (self.block_idx * self.config.tts_adapter_hidden_layers)
         bsz, tgt_len, _ = hidden_states.size()
         is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
         if self.encoder_attn and not is_updated:
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
         elif self.encoder_attn:
             # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx].to(query_states)
-            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx].to(query_states)
+            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx]
+            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
@@ -193,12 +193,7 @@ class TTSAdapterAttention(nn.Module):
                 past_key_values.is_updated[attn_idx] = True
                 key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
-                key_states, value_states = past_key_values.self_attention_cache.update(
-                    key_states,
-                    value_states,
-                    attn_idx,
-                    cache_kwargs
-                )
+                key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, attn_idx, cache_kwargs)
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -256,19 +251,19 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         output_attentions = False
-        attn_idx = self.layer_idx+self.block_idx
+        attn_idx = self.layer_idx + (self.block_idx * self.config.tts_adapter_hidden_layers)
         bsz, tgt_len, _ = hidden_states.size()
         is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
         if self.encoder_attn and not is_updated:
-            key_states = self._shape(self.k_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads).to(query_states)
-            value_states = self._shape(self.v_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads).to(query_states)
+            key_states = self._shape(self.k_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads)
         elif self.encoder_attn:
             # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx].to(query_states)
-            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx].to(query_states)
+            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx]
+            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), tgt_len, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), tgt_len, bsz, self.num_key_value_heads)
@@ -285,12 +280,7 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
                 past_key_values.is_updated[attn_idx] = True
                 key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
-                key_states, value_states = past_key_values.self_attention_cache.update(
-                    key_states,
-                    value_states,
-                    attn_idx,
-                    cache_kwargs
-                )
+                key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, attn_idx, cache_kwargs)
 
         # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
         # to be able to avoid many of these transpose/reshape/view.
@@ -376,19 +366,19 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
                 cache_position=cache_position
             )
 
-        attn_idx = self.layer_idx+self.block_idx
+        attn_idx = self.layer_idx + (self.block_idx * self.config.tts_adapter_hidden_layers)
         bsz, tgt_len, _ = hidden_states.size()
         is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
         if self.encoder_attn and not is_updated:
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
-            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads).to(query_states)
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
+            value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
         elif self.encoder_attn:
             # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx].to(query_states)
-            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx].to(query_states)
+            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx]
+            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
@@ -405,12 +395,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
                 past_key_values.is_updated[attn_idx] = True
                 key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
-                key_states, value_states = past_key_values.self_attention_cache.update(
-                    key_states,
-                    value_states,
-                    attn_idx,
-                    cache_kwargs
-                )
+                key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, attn_idx, cache_kwargs)
 
         # Attn
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -749,6 +734,80 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    def forward_block(
+        self,
+        block_idx,
+        inputs_embeds,
+        position_ids,
+        hidden_states,
+        encoder_hidden_states,
+        attention_mask,
+        encoder_attention_mask,
+        past_key_values,
+        all_hidden_states,
+        output_hidden_states,
+        all_self_attns,
+        all_cross_attentions,
+        output_attentions,
+        use_cache
+    ):
+        inputs_embeds_block = inputs_embeds[:, block_idx*self.config.block_step:(block_idx+1)*self.config.block_step, :, :].sum(dim=1)
+        if hidden_states is None:
+            hidden_states = inputs_embeds_block
+        else:
+            hidden_states = hidden_states.to(inputs_embeds_block) + inputs_embeds_block
+
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        for idx, decoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    decoder_layer.__call__,
+                    block_idx,
+                    hidden_states,
+                    attention_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    None,
+                    output_attentions,
+                    use_cache,
+                    position_embeddings,
+                )
+            else:
+                layer_outputs = decoder_layer(
+                    block_idx,
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    past_key_values=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    position_embeddings=position_embeddings,
+                )
+            hidden_states = layer_outputs[0]
+
+            if use_cache:
+                next_decoder_cache = layer_outputs[3 if output_attentions else 1]
+            else:
+                next_decoder_cache = None
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+                if encoder_hidden_states is not None:
+                    all_cross_attentions += (layer_outputs[2],)
+
+        hidden_states = self.norm(hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        return hidden_states, next_decoder_cache
+
     def forward(
         self,
         input_ids: List[torch.LongTensor] = None,
@@ -799,74 +858,59 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         # dropout
         inputs_embeds = nn.functional.dropout(inputs_embeds, p=self.dropout, training=self.training)
 
+        # expand attention mask
+        attention_mask, encoder_attention_mask = self._update_adapter_attention_mask(
+            inputs_embeds.clone().sum(dim=1), past_seen_tokens, encoder_hidden_states, attention_mask, encoder_attention_mask, output_attentions
+        )
+
         # decoder layers
+        logits = []
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
-        next_decoder_cache = None
 
-        hidden_states = None
-        logits = []
-        for block_idx in range(self.config.block_size):
-            inputs_embeds_block = inputs_embeds[:, block_idx*self.config.block_step:(block_idx+1)*self.config.block_step, :, :].sum(dim=1)
-            if hidden_states is None:
-                # expand attention mask
-                attention_mask, encoder_attention_mask = self._update_adapter_attention_mask(
-                    inputs_embeds, past_seen_tokens, encoder_hidden_states, attention_mask, encoder_attention_mask, output_attentions
-                )
-                hidden_states = inputs_embeds_block
-            else:
-                hidden_states = hidden_states.to(inputs_embeds_block) + inputs_embeds_block
+        hidden_states_first, next_decoder_cache = self.forward_block(
+            block_idx=0,
+            inputs_embeds=inputs_embeds,
+            position_ids=position_ids,
+            hidden_states=None,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
+            past_key_values=past_key_values,
+            all_hidden_states=all_hidden_states,
+            output_hidden_states=output_hidden_states,
+            all_self_attns=all_self_attns,
+            all_cross_attentions=all_cross_attentions,
+            output_attentions=output_attentions,
+            use_cache=use_cache
+        )
+        logits.append(self.adapter_head(0, hidden_states_first))
 
-            position_embeddings = self.rotary_emb(hidden_states, position_ids)
-            for idx, decoder_layer in enumerate(self.layers):
-                if output_hidden_states:
-                    all_hidden_states += (hidden_states,)
-
-                if self.gradient_checkpointing and self.training:
-                    layer_outputs = self._gradient_checkpointing_func(
-                        decoder_layer.__call__,
-                        block_idx,
-                        hidden_states,
-                        attention_mask,
-                        encoder_hidden_states,
-                        encoder_attention_mask,
-                        None,
-                        output_attentions,
-                        use_cache,
-                        position_embeddings,
-                    )
-                else:
-                    layer_outputs = decoder_layer(
-                        block_idx,
-                        hidden_states,
-                        attention_mask=attention_mask,
-                        encoder_hidden_states=encoder_hidden_states,
-                        encoder_attention_mask=encoder_attention_mask,
-                        past_key_values=past_key_values,
-                        output_attentions=output_attentions,
-                        use_cache=use_cache,
-                        position_embeddings=position_embeddings,
-                    )
-                hidden_states = layer_outputs[0]
-
-                if use_cache:
-                    next_decoder_cache = layer_outputs[3 if output_attentions else 1]
-
-                if output_attentions:
-                    all_self_attns += (layer_outputs[1],)
-
-                    if encoder_hidden_states is not None:
-                        all_cross_attentions += (layer_outputs[2],)
-
-            hidden_states = self.norm(hidden_states)
-
-            # add hidden states from the last decoder layer
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+        hidden_states_block = None
+        for block_idx in range(1, self.config.block_size):
+            hidden_states_block, next_decoder_cache = self.forward_block(
+                block_idx=block_idx,
+                inputs_embeds=inputs_embeds,
+                position_ids=position_ids,
+                hidden_states=(
+                    hidden_states_first+hidden_states_block
+                    if hidden_states_block is not None else hidden_states_first
+                ),
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=attention_mask,
+                encoder_attention_mask=encoder_attention_mask,
+                past_key_values=past_key_values,
+                all_hidden_states=all_hidden_states,
+                output_hidden_states=output_hidden_states,
+                all_self_attns=all_self_attns,
+                all_cross_attentions=all_cross_attentions,
+                output_attentions=output_attentions,
+                use_cache=use_cache
+            )
 
             # Logits
-            logits.append(self.adapter_head(block_idx, hidden_states))
+            logits.append(self.adapter_head(block_idx, hidden_states_block))
 
         next_cache = next_decoder_cache if use_cache else None
 
@@ -876,13 +920,13 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         if not return_dict:
             return tuple(
                 v
-                for v in [logits, hidden_states, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
+                for v in [logits, hidden_states_block, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
                 if v is not None
             )
 
         return AdapterModelOutputWithPastAndCrossAttentions(
             logits=logits,
-            last_hidden_state=hidden_states,
+            last_hidden_state=hidden_states_block,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
