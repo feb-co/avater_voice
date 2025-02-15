@@ -82,6 +82,7 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
             )
             self.audio_duration_token = 13
             self.code_size = 2048
+            self.sample_rate = 24000
         else:
             raise NotImplementedError
 

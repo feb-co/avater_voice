@@ -54,15 +54,27 @@ Please repeat the following user's input (which may contain the two special symb
 
 """
     text_template = """{content}<|eot_id|>"""
+    
+    # from datasets import DatasetDict, load_dataset, load_from_disk
+    # tokenized_data = load_from_disk("/mnt/ceph/licheng/data-bin/train_data_tts_golden")
+    # audio_codes = torch.LongTensor(tokenized_data["train"][0]["decoder_input_ids"])[:, 1:-1].to(tokenizer.device)
 
-    signal = AudioSignal("/mnt/ceph/licheng/voice_experiment/TTS/data/synthesis_data/chat_faq/waves/f3530414a89811efb0c64a67e220d664.wav")
+    # audio = tokenizer.decode(audio_codes.view(1, audio_codes.size(0), audio_codes.size(-1)))
+    # audio = AudioSignal(audio, sample_rate=24000)
+    # audio.to("cpu")
+    # audio.write("/mnt/ceph/licheng/test.wav")
+    # import pdb; pdb.set_trace()
+
+    # signal = AudioSignal("/mnt/ceph/licheng/azure_1_24.wav")
+    signal = AudioSignal("/mnt/ceph/licheng/voice_experiment/TTS/data/golden_data/life_and_work/waves/7822900391.wav")
+    # signal = AudioSignal("/mnt/ceph/licheng/voice_experiment/TTS/data/synthesis_data/chat_faq/waves/f3530414a89811efb0c64a67e220d664.wav")
     _, codes = tokenizer.encode(text=None, audio_signal=signal)
     print(len(codes[0]), codes, flush=True)
 
     # init encoder input
     prefix_input_ids = tokenizer.encode(prefix_text_template.format(content=input_text))
     text_input_ids = tokenizer.encode(text_template.format(content=input_text), add_special_tokens=False)
-    input_ids = torch.LongTensor([prefix_input_ids+text_input_ids+[128009]*(1024-len(prefix_input_ids+text_input_ids))])
+    input_ids = torch.LongTensor([prefix_input_ids+text_input_ids])
     valid_tokens_pos=torch.arange(len(prefix_input_ids), len(prefix_input_ids)+len(text_input_ids)).view(1, -1).to(input_ids)
 
     inputs = {
@@ -75,7 +87,8 @@ Please repeat the following user's input (which may contain the two special symb
         "encoder_decoder_attention_mask": torch.LongTensor([tokenizer.convert_t2a_attention_mask(text_input_ids, codes)]).to(model.device),
         "decoder_labels": torch.LongTensor([codes]).to(model.device)
     }
-    output = model(**inputs)
+    with torch.no_grad():
+        output = model(**inputs)
     print("------", output.loss, flush=True)
 
     # init decoder input
@@ -105,7 +118,7 @@ Please repeat the following user's input (which may contain the two special symb
     audio_codes = outputs[:, 1:-1]
 
     audio = tokenizer.decode(audio_codes.view(1, audio_codes.size(0), audio_codes.size(-1)))
-    audio = AudioSignal(audio, sample_rate=16000)
+    audio = AudioSignal(audio, sample_rate=24000)
     audio.to("cpu")
     audio.write("/mnt/ceph/licheng/test.wav")
 
@@ -116,5 +129,7 @@ if __name__ == "__main__":
     tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
     inference_tts(
         model, tokenizer, generation_config,
-        "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
+        "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
+        # "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
+        # "That's great. And, uh, thank you for talking with me."
     )

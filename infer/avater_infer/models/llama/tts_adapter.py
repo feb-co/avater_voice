@@ -737,8 +737,7 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
     def forward_block(
         self,
         block_idx,
-        inputs_embeds,
-        position_ids,
+        position_embeddings,
         hidden_states,
         encoder_hidden_states,
         attention_mask,
@@ -751,13 +750,6 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         output_attentions,
         use_cache
     ):
-        inputs_embeds_block = inputs_embeds[:, block_idx*self.config.block_step:(block_idx+1)*self.config.block_step, :, :].sum(dim=1)
-        if hidden_states is None:
-            hidden_states = inputs_embeds_block
-        else:
-            hidden_states = hidden_states.to(inputs_embeds_block) + inputs_embeds_block
-
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         for idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -845,22 +837,26 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
                 (self.config.code_size+self.config.audio_special_tokens)
             ).view(1, self.config.code_layers, 1).to(input_ids)
             inputs_embeds = self.embed_tokens(input_ids+pos_bias)
+            inputs_embeds = inputs_embeds.sum(dim=1)
 
         # expand cache
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         # expand posistion
         cache_position = torch.arange(
-            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[2], device=inputs_embeds.device
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
         )
         position_ids = cache_position.unsqueeze(0)
+
+        # pos embedding
+        position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
 
         # dropout
         inputs_embeds = nn.functional.dropout(inputs_embeds, p=self.dropout, training=self.training)
 
         # expand attention mask
         attention_mask, encoder_attention_mask = self._update_adapter_attention_mask(
-            inputs_embeds.clone().sum(dim=1), past_seen_tokens, encoder_hidden_states, attention_mask, encoder_attention_mask, output_attentions
+            inputs_embeds, past_seen_tokens, encoder_hidden_states, attention_mask, encoder_attention_mask, output_attentions
         )
 
         # decoder layers
@@ -868,35 +864,14 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
+        hidden_states = inputs_embeds
+        for block_idx in range(self.config.block_size):
+            residual = hidden_states
 
-        hidden_states_first, next_decoder_cache = self.forward_block(
-            block_idx=0,
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            hidden_states=None,
-            encoder_hidden_states=encoder_hidden_states,
-            attention_mask=attention_mask,
-            encoder_attention_mask=encoder_attention_mask,
-            past_key_values=past_key_values,
-            all_hidden_states=all_hidden_states,
-            output_hidden_states=output_hidden_states,
-            all_self_attns=all_self_attns,
-            all_cross_attentions=all_cross_attentions,
-            output_attentions=output_attentions,
-            use_cache=use_cache
-        )
-        logits.append(self.adapter_head(0, hidden_states_first))
-
-        hidden_states_block = None
-        for block_idx in range(1, self.config.block_size):
-            hidden_states_block, next_decoder_cache = self.forward_block(
+            hidden_states, next_decoder_cache = self.forward_block(
                 block_idx=block_idx,
-                inputs_embeds=inputs_embeds,
-                position_ids=position_ids,
-                hidden_states=(
-                    hidden_states_first+hidden_states_block
-                    if hidden_states_block is not None else hidden_states_first
-                ),
+                position_embeddings=position_embeddings,
+                hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
                 encoder_attention_mask=encoder_attention_mask,
@@ -910,7 +885,10 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
             )
 
             # Logits
-            logits.append(self.adapter_head(block_idx, hidden_states_block))
+            logits.append(self.adapter_head(block_idx, hidden_states))
+
+            # residual
+            hidden_states = residual.to(hidden_states) + hidden_states
 
         next_cache = next_decoder_cache if use_cache else None
 
@@ -920,13 +898,13 @@ class TTSAdapter(LlamaTTSPreTrainedModel):
         if not return_dict:
             return tuple(
                 v
-                for v in [logits, hidden_states_block, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
+                for v in [logits, hidden_states, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
                 if v is not None
             )
 
         return AdapterModelOutputWithPastAndCrossAttentions(
             logits=logits,
-            last_hidden_state=hidden_states_block,
+            last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
