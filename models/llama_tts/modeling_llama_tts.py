@@ -7,12 +7,10 @@ import torch
 from transformers.utils import logging
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.modeling_utils import get_checkpoint_shard_files
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
-from avater_infer.models.llama import TTSAdapter, LlamaTTSPreTrainedModel
+from avater_infer.models.voice import TTSAdapter, AvaterTTSPreTrainedModel
 from avater_infer.cache_utils import AvaterCache
-from avater_infer.modeling_utils import get_archive_file
 from avater_infer.modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions, Seq2SeqCausalLMOutputWithCrossAttentions
 
 
@@ -22,16 +20,17 @@ from .configuration_llama_tts import LlamaTTSConfig
 logger = logging.get_logger(__name__)
 
 
-class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
+class LlamaTTSForCausalLM(AvaterTTSPreTrainedModel, GenerationMixin):
     config_class = LlamaTTSConfig
 
     def __init__(self, config: LlamaTTSConfig):
         super().__init__(config)
-        
+
         self.config = config
         self.audio_vocab_size = config.audio_vocab_size
 
-        self.llm = LlamaForCausalLM(config)
+        self.llm: LlamaForCausalLM = LlamaForCausalLM.from_pretrained(config.llm_path)
+            
         self.tts_adapter = TTSAdapter(config)
 
         # Initialize weights and apply final processing
@@ -46,36 +45,6 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
 
     def get_encoder(self,):
         return self.llm
-
-    def load_llm_state_dict(self, llm_pretrained_model_name_or_path):
-        archive_file, is_sharded = get_archive_file(llm_pretrained_model_name_or_path)
-        if is_sharded:
-            archive_file, sharded_metadata = get_checkpoint_shard_files(
-                llm_pretrained_model_name_or_path,
-                archive_file,
-            )
-
-        state_dict = None
-
-        if is_sharded:
-            loaded_state_dict_keys = sharded_metadata["all_checkpoint_keys"]
-        else:
-            loaded_state_dict_keys = list(state_dict.keys())
-
-        (
-            self.llm,
-            missing_keys,
-            unexpected_keys,
-            mismatched_keys,
-            offload_index,
-            error_msgs,
-        ) = self._load_pretrained_model(
-            self.llm,
-            state_dict,
-            loaded_state_dict_keys,  # XXX: rename?
-            archive_file,
-            llm_pretrained_model_name_or_path
-        )
 
     def forward(
         self,
@@ -165,7 +134,6 @@ class LlamaTTSForCausalLM(LlamaTTSPreTrainedModel, GenerationMixin):
         # Loss
         loss = None
         if decoder_labels is not None:
-            kwargs.pop("labels")
             loss = self.loss_function(
                 logits=decoder_logits,
                 labels=decoder_labels.view(-1, tgt_len),

@@ -13,7 +13,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from transformers.cache_utils import DynamicCache
 
 from avater_infer.models.patcher import patch_model, patch_init
-from avater_infer.models.llama.configuration_voice import LlamaVoiceConfig
 from avater_infer.cache_utils import AvaterCache
 
 
@@ -66,7 +65,7 @@ Please repeat the following user's input (which may contain the two special symb
     # import pdb; pdb.set_trace()
 
     # signal = AudioSignal("/mnt/ceph/licheng/azure_1_24.wav")
-    signal = AudioSignal("/mnt/ceph/licheng/voice_experiment/TTS/data/golden_data/life_and_work/waves/7822900391.wav")
+    signal = AudioSignal("/mnt/ceph/licheng/1a55d9a4-e90a-11ef-86a7-4a67e220d664.wav")
     # signal = AudioSignal("/mnt/ceph/licheng/voice_experiment/TTS/data/synthesis_data/chat_faq/waves/f3530414a89811efb0c64a67e220d664.wav")
     _, codes = tokenizer.encode(text=None, audio_signal=signal)
     print(len(codes[0]), codes, flush=True)
@@ -129,7 +128,8 @@ if __name__ == "__main__":
     tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
     inference_tts(
         model, tokenizer, generation_config,
-        "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
+        # "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
         # "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
         # "That's great. And, uh, thank you for talking with me."
+        "Hi, I am Ray Dalio! hahaha"
     )

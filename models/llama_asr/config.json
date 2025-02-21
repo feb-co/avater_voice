@@ -1,0 +1,15 @@
+{
+    "architectures": [
+      "LlamaASRForCausalLM"
+    ],
+    "auto_map": {
+      "AutoConfig": "configuration_llama_asr.LlamaASRConfig",
+      "AutoModel": "modeling_llama_asr.LlamaASRForCausalLM",
+      "AutoModelForCausalLM": "modeling_llama_asr.LlamaASRForCausalLM"
+    },
+    "whisper_hidden_size": 1280,
+    "wavlm_hidden_size": 768,
+    "asr_adapter_hidden_size": 1024,
+    "asr_adapter_intermediate_size": 2744,
+    "torch_dtype": "bfloat16"
+}

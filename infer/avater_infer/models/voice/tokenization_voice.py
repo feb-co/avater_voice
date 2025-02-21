@@ -2,7 +2,6 @@ import os
 import json
 import copy
 import torch
-import whisper
 from audiotools import AudioSignal
 from collections.abc import Mapping
 from typing import Union, Any, Dict, List, Optional, Tuple
@@ -10,22 +9,34 @@ from typing import Union, Any, Dict, List, Optional, Tuple
 from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer, EncodedInput, PaddingStrategy, TOKENIZER_CONFIG_FILE
 from transformers.utils import TensorType
 from transformers.dynamic_module_utils import custom_object_save
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoFeatureExtractor
 
 
 TEXT_TOKENIZER_PATH = os.getenv("AVATER_TEXT_TOKENIZER_PATH", None)
 AUDIO_TOKENIZER_PATH = os.getenv("AVATER_AUDIO_TOKENIZER_PATH", None)
+WHIPER_TOKENIZER_PATH = os.getenv("AVATER_WHIPER_PATH", None)
+WAVLM_TOKENIZER_PATH = os.getenv("AVATER_WAVLM_PATH", None)
 
 
-def load_whisper_audio(path):
-    audio = whisper.load_audio(path)
-    duration_ms = (len(audio) / 16000) * 1000
-    audio = whisper.pad_or_trim(audio)
-    mel = whisper.log_mel_spectrogram(audio)
-    return mel, int(duration_ms / 20) + 1
+def get_audio_encoder_out_seq_lens(array_len):
+    duration_ms = (array_len / 16000) * 1000
+    return int(duration_ms / 20) + 1
 
 
-class LlamaVoiceTokenizer(PreTrainedTokenizer):
+def get_1dconv_out_seq_lens(n_layers, in_seq_lens):
+    if isinstance(in_seq_lens, int):
+        out = in_seq_lens
+        for _ in range(n_layers):
+            out = int((out - 1) / 2 + 1)
+        return out
+    else:
+        out = in_seq_lens.clone()
+        for _ in range(n_layers):
+            out = ((out.float() - 1) / 2 + 1).floor().long()
+        return out
+
+
+class AvaterVoiceTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         audio_special_token: Optional[Dict[str, Any]] = None,
@@ -33,6 +44,8 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
         long_wait_string="<|LONG_WAIT|>",
         audio_tokenizer="moshi_mimi",
         text_duration_token=5,
+        audio_downsample_layer=2,
+        audio_encoder_sample_rate=16000,
         device="cpu",
         **kwargs
     ):
@@ -65,12 +78,10 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
         self.text_tokenizer = AutoTokenizer.from_pretrained(TEXT_TOKENIZER_PATH)
 
         # audio encoder init
-        try:
-            self.whisper_tokenizer = whisper.load_model("small", download_root=AUDIO_TOKENIZER_PATH).to(device)
-        except:
-            import ssl
-            ssl._create_default_https_context = ssl._create_unverified_context
-            self.whisper_tokenizer = whisper.load_model("small", download_root=AUDIO_TOKENIZER_PATH).to(device)
+        self.audio_downsample_layer = audio_downsample_layer
+        self.audio_encoder_sample_rate = audio_encoder_sample_rate
+        self.whisper_processor = AutoFeatureExtractor.from_pretrained(WHIPER_TOKENIZER_PATH)
+        self.wavlm_processor = AutoFeatureExtractor.from_pretrained(WAVLM_TOKENIZER_PATH)
 
         # audio tokenizer init
         if audio_tokenizer == "moshi_mimi":
@@ -82,7 +93,8 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
             )
             self.audio_duration_token = 13
             self.code_size = 2048
-            self.sample_rate = 24000
+            self.code_layer = 8
+            self.audio_tokenizer_sample_rate = 24000
         else:
             raise NotImplementedError
 
@@ -97,7 +109,7 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
             f" special_tokens={self.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
             " added_tokens_decoder={\n\t" + added_tokens_decoder_rep + "\n}\n)"
         )
-    
+
     def save_pretrained(
         self,
         save_directory: Union[str, os.PathLike],
@@ -135,6 +147,9 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
             "audio_tokenizer": self.audio_tokenizer_type,
             "text_duration_token": self.text_duration_token,
             "audio_special_token": self.audio_special_token,
+            "audio_downsample_layer": self.audio_downsample_layer,
+            "audio_encoder_sample_rate": self.audio_encoder_sample_rate,
+            "audio_tokenizer_sample_rate": self.audio_tokenizer_sample_rate,
             "device": self.device
         })
 
@@ -182,23 +197,78 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
         if isinstance(encoded_inputs, (list, tuple)) and isinstance(encoded_inputs[0], Mapping):
             encoded_inputs = {key: [example[key] for example in encoded_inputs] for key in encoded_inputs[0].keys()}
 
-        batch_outputs = {}
-        for key, values in encoded_inputs.items():
-            if key not in batch_outputs:
-                batch_outputs[key] = []
+        batch_outputs = {
+            "input_ids": [], "attention_mask": [], "text_labels": [],
+            "audio_features": [], "audio_attention_mask": [],
+            "wavlm_features": [], "wavlm_attention_mask": [],
+            "audio_positions": [],
+            "valid_tokens_pos": [], "encoder_decoder_attention_mask": [],
+            "decoder_input_ids": [], "decoder_attention_mask": [], "decoder_labels": [],
+        }
 
+        # text
+        for key in ["input_ids", "attention_mask", "text_labels"]:
+            values = encoded_inputs[key]
             if "input_ids" == key:
                 pad_token = self.text_tokenizer.pad_token_id
-            elif "decoder_input_ids" == key:
+            elif "attention_mask" == key:
+                pad_token = 0
+            elif "text_labels" == key:
+                pad_token = -100
+            else:
+                raise ValueError(f"Invalid key: {key}")
+
+            max_length = max([len(item) for item in values])
+            for value in values:
+                difference = max_length - len(value)
+                if padding_side == "right":
+                    outputs = value + [pad_token] * difference
+                elif padding_side == "left":
+                    outputs = [pad_token] * difference + value
+                else:
+                    raise ValueError(f"Invalid padding strategy: {padding_side}")
+    
+                batch_outputs[key].append(outputs)
+
+        # audio input
+        for batch_idx, batch_values in enumerate(encoded_inputs["audio_features"]):
+            if batch_values is None:
+                continue
+
+            for value, pos in zip(batch_values, encoded_inputs["audio_positions"][batch_idx]):
+                # pos
+                batch_outputs["audio_positions"].append([batch_idx]+pos)
+                
+                # audio
+                batch_outputs["audio_features"].append(value["whisper_input"]["input_features"])
+                batch_outputs["audio_attention_mask"].append(value["whisper_input"]["attention_mask"])
+
+                # wavlm
+                pad_len = self.audio_encoder_sample_rate*30-len(value["wavlm_input"]["input_values"])
+                batch_outputs["audio_features"].append(value["wavlm_input"]["input_values"]+[0.0]*pad_len)
+                batch_outputs["audio_attention_mask"].append(value["wavlm_input"]["attention_mask"]+[0]*pad_len)
+
+        # audio output
+        for key in ["valid_tokens_pos", "encoder_decoder_attention_mask", "decoder_input_ids", "decoder_attention_mask", "decoder_labels"]:
+            values = encoded_inputs[key]
+            if "decoder_input_ids" == key:
                 pad_token = self.audio_special_token["eoa_token"]
             elif "decoder_labels" == key:
                 pad_token = -100
             else:
                 pad_token = 0
 
-            if key in ("input_ids", "attention_mask", "valid_tokens_pos", "decoder_attention_mask"):
-                max_length = max([len(item) for item in values])
+            if key in ("valid_tokens_pos", "decoder_attention_mask"):
+                try:
+                    max_length = max([len(item) for item in values if item])
+                except:
+                    continue
                 for value in values:
+                    if value is None and key == "decoder_attention_mask":
+                        value = [1 for _ in range(max_length)]
+                    elif value is None:
+                        value = []
+
                     difference = max_length - len(value)
                     if padding_side == "right":
                         outputs = value + [pad_token] * difference
@@ -209,8 +279,14 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
 
                     batch_outputs[key].append(outputs)
             elif key in ("decoder_input_ids", "decoder_labels",):
-                max_length = max([len(item[0]) for item in values])
+                try:
+                    max_length = max([len(item[0]) for item in values if item])
+                except:
+                    continue
                 for layer_idx, value in enumerate(values):
+                    if value is None:
+                        value = [[] for _ in range(self.code_layer)]
+
                     outputs = []
                     difference = max_length - len(value[0])
                     for out in value:
@@ -224,16 +300,29 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
                         outputs.append(out)
                     batch_outputs[key].append(outputs)
             elif key in ("encoder_decoder_attention_mask",):
-                max_length = [
-                    max([len(item) for item in values]),
-                    max([len(item[0]) for item in values]),
-                ]
+                try:
+                    max_length = [
+                        max([len(item) for item in values if item]),
+                        max([len(item[0]) for item in values if item]),
+                    ]
+                except:
+                    continue
                 for value in values:
-                    outputs = torch.zeros(max_length, dtype=torch.long)
-                    outputs[:len(value), :len(value[0])] = torch.LongTensor(value)
+                    if value is not None:
+                        outputs = torch.zeros(max_length, dtype=torch.long)
+                        outputs[:len(value), :len(value[0])] = torch.LongTensor(value)
+                    else:
+                        outputs = torch.ones(max_length, dtype=torch.long)
                     batch_outputs[key].append(outputs.tolist())
             else:
                 raise ValueError(f"Invalid key padding strategy: {key}")
+
+        # remove empty field
+        for key in list(batch_outputs.keys()):
+            if batch_outputs[key]:
+                continue
+            
+            del batch_outputs[key]
 
         return BatchEncoding(batch_outputs, tensor_type=return_tensors)
 
@@ -253,12 +342,15 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
             )
         else:
             text_token_ids = None
-            
+
         if audio_signal:
             with torch.no_grad():
                 if isinstance(audio_signal, list):
                     codes = []
                     for signal in audio_signal:
+                        signal_data = signal["signal"] if "signal" in signal else AudioSignal(signal["file"])
+                        assert signal_data.sample_rate == self.audio_tokenizer_sample_rate, f"The sample rate of audio tokenizer should equal with {self.audio_tokenizer_sample_rate}."
+
                         if signal["split"] == self.long_wait_string:
                             split_token = self.audio_special_token["long_wait_token"]
                         elif signal["split"] == self.short_wait_string:
@@ -266,11 +358,7 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
                         else:
                             split_token = None
 
-                        sub_codes = self.audio_tokenizer.encode(
-                            signal["signal"].audio_data.to(self.device)
-                            if "signal" in signal else
-                            AudioSignal(signal["file"]).audio_data.to(self.device)
-                        )[0]
+                        sub_codes = self.audio_tokenizer.encode(signal_data.audio_data.to(self.device))[0]
                         for idx, sub_code in enumerate(sub_codes):
                             code_list: list = sub_code.tolist()
 
@@ -289,6 +377,7 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
                             else:
                                 codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
                 else:
+                    assert audio_signal.sample_rate == self.audio_tokenizer_sample_rate, f"The sample rate of audio tokenizer should equal with {self.audio_tokenizer_sample_rate}."
                     codes = self.audio_tokenizer.encode(audio_signal.audio_data.to(self.device))[0]
                     codes = codes.tolist()
                     for idx in range(len(codes)):
@@ -302,26 +391,22 @@ class LlamaVoiceTokenizer(PreTrainedTokenizer):
         else:
             return text_token_ids
 
-    def encode_whisper_features(self, elem):
-        if not isinstance(elem, dict):
-            audio_signal = json.loads(elem)
+    def encode_audio_feature(self, elem: dict):
+        assert elem["type"] == "audio", f"The type of input element ({elem}) must be `audio`!"
+        signal_data: AudioSignal = elem["signal"] if "signal" in elem else AudioSignal(elem["file"])
 
-        token_ids = []
-        audio_features = None
-        audio_pos = []
-        for signal in audio_signal:
-            if signal["split"]:
-                token_ids += self.text_tokenizer.encode(signal["split"], add_special_tokens=False)
+        assert signal_data.sample_rate == self.audio_encoder_sample_rate, f"The sample rate of audio encoder should equal with {self.audio_encoder_sample_rate}."
+        signal_array = signal_data.audio_data.squeeze().numpy()
 
-            mel, leng = load_whisper_audio(signal["file"])
-            audio_pos.append([len(token_ids), leng])
-            token_ids += [self.text_tokenizer.eos_token_id] * leng
-            if not audio_features:
-                audio_features = self.whisper_tokenizer.embed_audio(mel)[0][:leng]
-            else:
-                audio_features = torch.cat([audio_features, self.whisper_tokenizer.embed_audio(mel)[0][:leng]], dim=0)
+        whisper_input = self.whisper_processor(signal_array, sampling_rate=self.audio_encoder_sample_rate, return_attention_mask=True)        
+        wavlm_input = self.wavlm_processor(signal_array, sampling_rate=self.audio_encoder_sample_rate, return_attention_mask=True)
+        for key in whisper_input:
+            whisper_input[key] = whisper_input[key][0].tolist()
+        for key in wavlm_input:
+            whisper_input[key] = whisper_input[key][0].tolist()
 
-        return token_ids, audio_features, audio_pos
+        audio_length = get_1dconv_out_seq_lens(get_audio_encoder_out_seq_lens(len(signal_array)))
+        return audio_length, {"whisper_input": whisper_input, "wavlm_input": wavlm_input}
 
     def decode(
         self,

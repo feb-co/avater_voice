@@ -1,13 +1,13 @@
 """LLaMA TTS model configuration"""
 import os
 
-from avater_infer.models.llama import LlamaVoiceConfig
+from avater_infer.models.voice import AvaterVoiceConfig
 
 
 LLM_PATH = os.getenv("AVATER_LLM_PATH", None)
 
 
-class LlamaTTSConfig(LlamaVoiceConfig):
+class LlamaTTSConfig(AvaterVoiceConfig):
     model_type = "llama tts"
 
     def __init__(

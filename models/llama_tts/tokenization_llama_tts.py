@@ -1,14 +1,14 @@
 import os
 from typing import Any, Dict, Optional
 
-from avater_infer.models.llama import LlamaVoiceTokenizer
+from avater_infer.models.voice import AvaterVoiceTokenizer
 
 
 TEXT_TOKENIZER_PATH = os.getenv("AVATER_TEXT_TOKENIZER_PATH", None)
 AUDIO_TOKENIZER_PATH = os.getenv("AVATER_AUDIO_TOKENIZER_PATH", None)
 
 
-class LlamaTTSTokenizer(LlamaVoiceTokenizer):
+class LlamaTTSTokenizer(AvaterVoiceTokenizer):
     def __init__(
         self,
         audio_special_token: Optional[Dict[str, Any]] = None,

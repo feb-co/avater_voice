@@ -1,0 +1,14 @@
+{
+  "name_or_path": "LlamaASRTokenizer",
+  "auto_map": {
+    "AutoTokenizer": [
+      "tokenization_llama_asr.LlamaASRTokenizer",
+      null
+      ]
+  },
+  "add_prefix_space": false,
+  "tokenizer_class": "LlamaASRTokenizer",
+  "use_fast": false,
+  "audio_downsample_layer": 2,
+  "device": "cuda"
+}

@@ -1,4 +1,4 @@
-"""PyTorch LLaMA TTS model."""
+"""PyTorch Avater TTS adapter."""
 
 import math
 from typing import List, Optional, Tuple, Union
@@ -31,7 +31,7 @@ from transformers.models.bart.modeling_bart import (
 )
 
 from ...modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions
-from .configuration_voice import LlamaVoiceConfig
+from .configuration_voice import AvaterVoiceConfig
 
 
 logger = logging.get_logger(__name__)
@@ -60,7 +60,7 @@ class AdapterAudioEmbedding(nn.Embedding):
 
 
 class AdapterHead(nn.Module):
-    def __init__(self, config: LlamaVoiceConfig):
+    def __init__(self, config: AvaterVoiceConfig):
         super().__init__()
         self.head_block = nn.ModuleList([])
         for _ in range(config.block_size):
@@ -71,7 +71,7 @@ class AdapterHead(nn.Module):
 
 
 class TTSAdapterMLP(nn.Module):
-    def __init__(self, config: LlamaVoiceConfig):
+    def __init__(self, config: AvaterVoiceConfig):
         super().__init__()
         self.config = config
         self.hidden_size = config.tts_adapter_hidden_size
@@ -107,7 +107,7 @@ class TTSAdapterMLP(nn.Module):
 class TTSAdapterAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaVoiceConfig, layer_idx: Optional[int] = None, block_idx: Optional[int] = None, encoder_attn=False, is_causal: bool = False):
+    def __init__(self, config: AvaterVoiceConfig, layer_idx: Optional[int] = None, block_idx: Optional[int] = None, encoder_attn=False, is_causal: bool = False):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -449,7 +449,7 @@ TTS_ADAPTER_ATTENTION_CLASSES = {
 
 
 class TTSAdapterBlock(nn.Module):
-    def __init__(self, config: LlamaVoiceConfig, block_idx: int, layer_idx: int):
+    def __init__(self, config: AvaterVoiceConfig, block_idx: int, layer_idx: int):
         super().__init__()
         self.block_idx = block_idx
         self.dropout = config.tts_adapter_dropout
@@ -526,7 +526,7 @@ class TTSAdapterBlock(nn.Module):
 
 
 class TTSAdapterLayer(nn.Module):
-    def __init__(self, config: LlamaVoiceConfig, layer_idx: int):
+    def __init__(self, config: AvaterVoiceConfig, layer_idx: int):
         super().__init__()
         self.mlp_block = nn.ModuleList([])
         for block_idx in range(config.block_size):
@@ -583,8 +583,8 @@ class TTSAdapterLayer(nn.Module):
         return outputs
 
 
-class LlamaTTSPreTrainedModel(PreTrainedModel):
-    config_class = LlamaVoiceConfig
+class AvaterTTSPreTrainedModel(PreTrainedModel):
+    config_class = AvaterVoiceConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["LlamaDecoderLayer", "TTSAdapterLayer"]
@@ -607,10 +607,10 @@ class LlamaTTSPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-class TTSAdapter(LlamaTTSPreTrainedModel):
+class TTSAdapter(AvaterTTSPreTrainedModel):
     _tied_weights_keys = ["embed_tokens.weight", "adapter_head.weight"]
 
-    def __init__(self, config: LlamaVoiceConfig):
+    def __init__(self, config: AvaterVoiceConfig):
         super().__init__(config)
         self.config = config
         self.dropout = config.tts_adapter_dropout
