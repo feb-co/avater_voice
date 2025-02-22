@@ -28,7 +28,11 @@ class LlamaASRForCausalLM(AvaterASRPreTrainedModel, GenerationMixin):
         self.audio_vocab_size = config.audio_vocab_size
 
         self.asr_encoder = ASREncoder(config)
-        self.llm: LlamaForCausalLM = LlamaForCausalLM.from_pretrained(config.llm_path)
+
+        if config.llm_path:
+            self.llm: LlamaForCausalLM = LlamaForCausalLM.from_pretrained(config.llm_path)
+        else:
+            self.llm: LlamaForCausalLM = LlamaForCausalLM(config)
 
         # Initialize weights and apply final processing
         self.post_init()

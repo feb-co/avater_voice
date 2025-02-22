@@ -16,7 +16,7 @@ from transformers import AutoModel
 from transformers.utils import logging
 from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutput, Wav2Vec2BaseModelOutput
-from transformers.models.whisper.modeling_whisper import WhisperEncoderLayer
+from transformers.models.whisper.modeling_whisper import WhisperEncoderLayer, WhisperModel
 from transformers.models.wavlm.modeling_wavlm import WavLMModel, WavLMEncoderLayerStableLayerNorm
 from transformers.models.llama.modeling_llama import ACT2FN, LlamaRMSNorm
 
@@ -173,12 +173,18 @@ class ASREncoder(AvaterASRPreTrainedModel):
         self.config = config
 
         # Whiper
-        self.whisper_encoder = AutoModel.from_pretrained(config.whisper_path).encoder
-        self.whisper_adapter = ASRAdapter(config.whisper_hidden_size, config)
+        if config.whisper_path:
+            self.whisper_encoder = WhisperModel.from_pretrained(config.whisper_path).encoder
+        else:
+            self.whisper_encoder = WhisperModel(config.whisper_config).encoder
+        self.whisper_adapter = ASRAdapter(config.whisper_config.d_model, config)
 
         # WavLM
-        self.wavlm_encoder = WavLMModel.from_pretrained(config.wavlm_path)
-        self.wavlm_adapter = ASRAdapter(config.wavlm_hidden_size, config)
+        if config.wavlm_path:
+            self.wavlm_encoder = WavLMModel.from_pretrained(config.wavlm_path)
+        else:
+            self.wavlm_encoder = WavLMModel(config.wavlm_config)
+        self.wavlm_adapter = ASRAdapter(config.wavlm_config.output_hidden_size, config)
 
         # concat projector
         self.concat_proj = nn.Linear(config.asr_adapter_hidden_size*2, config.hidden_size)
@@ -220,7 +226,7 @@ class ASREncoder(AvaterASRPreTrainedModel):
             input_values=wavlm_features,
             attention_mask=wavlm_attention_mask
         )
-        wavlm_hidden_state = self.whisper_adapter(whisper_outputs.last_hidden_state)
+        wavlm_hidden_state = self.wavlm_adapter(wavlm_outputs.last_hidden_state)
 
         # concat
         concat_features = torch.zeros([audio_positions.size(0), torch.max(audio_positions[:, 2]), self.config.asr_adapter_hidden_size*2]).to(wavlm_hidden_state)

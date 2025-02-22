@@ -29,8 +29,11 @@ class LlamaTTSForCausalLM(AvaterTTSPreTrainedModel, GenerationMixin):
         self.config = config
         self.audio_vocab_size = config.audio_vocab_size
 
-        self.llm: LlamaForCausalLM = LlamaForCausalLM.from_pretrained(config.llm_path)
-            
+        if config.llm_path:
+            self.llm: LlamaForCausalLM = LlamaForCausalLM.from_pretrained(config.llm_path)
+        else:
+            self.llm: LlamaForCausalLM = LlamaForCausalLM(config)
+
         self.tts_adapter = TTSAdapter(config)
 
         # Initialize weights and apply final processing

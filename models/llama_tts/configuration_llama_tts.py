@@ -4,9 +4,6 @@ import os
 from avater_infer.models.voice import AvaterVoiceConfig
 
 
-LLM_PATH = os.getenv("AVATER_LLM_PATH", None)
-
-
 class LlamaTTSConfig(AvaterVoiceConfig):
     model_type = "llama tts"
 
@@ -26,10 +23,8 @@ class LlamaTTSConfig(AvaterVoiceConfig):
         tie_audio_embeddings=False,
         **kwargs,
     ):
-        try:
+        if "llm_path" in kwargs:
             del kwargs["llm_path"]
-        except:
-            pass
 
         super().__init__(
             audio_special_tokens=audio_special_tokens,
@@ -43,7 +38,6 @@ class LlamaTTSConfig(AvaterVoiceConfig):
             tts_adapter_attention_dropout=tts_adapter_attention_dropout,
             boa_token_id=boa_token_id,
             eoa_token_id=eoa_token_id,
-            llm_path=LLM_PATH,
             tie_audio_embeddings=tie_audio_embeddings,
             **kwargs
         )
