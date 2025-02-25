@@ -12,7 +12,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     apply_activation_checkpointing,
 )
 
-from transformers import AutoModel
 from transformers.utils import logging
 from transformers.modeling_utils import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutput, Wav2Vec2BaseModelOutput
@@ -81,7 +80,7 @@ class Conv1dSubsampler(nn.Module):
             x = conv(x)
             x = nn.functional.glu(x, dim=1)
         _, _, out_seq_len = x.size()
-        x = x.transpose(1, 2).transpose(0, 1).contiguous()  # -> T x B x (C x D)
+        x = x.transpose(1, 2).contiguous()  # -> B x T x (C x D)
         return x
 
 
@@ -233,5 +232,5 @@ class ASREncoder(AvaterASRPreTrainedModel):
         concat_features[:, :, :self.config.asr_adapter_hidden_size] = whisper_hidden_state[:, :concat_features.size(1), :]
         concat_features[:, :, self.config.asr_adapter_hidden_size:] = wavlm_hidden_state[:, :concat_features.size(1), :]
         audio_hidden_state = self.concat_proj(concat_features)
-        
+
         return audio_hidden_state

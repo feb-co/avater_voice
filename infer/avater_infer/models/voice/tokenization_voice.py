@@ -2,7 +2,9 @@ import os
 import json
 import copy
 import torch
-from audiotools import AudioSignal
+import whisper
+import time
+import numpy as np
 from collections.abc import Mapping
 from typing import Union, Any, Dict, List, Optional, Tuple
 
@@ -14,7 +16,7 @@ from transformers import AutoTokenizer, AutoFeatureExtractor
 
 TEXT_TOKENIZER_PATH = os.getenv("AVATER_TEXT_TOKENIZER_PATH", None)
 AUDIO_TOKENIZER_PATH = os.getenv("AVATER_AUDIO_TOKENIZER_PATH", None)
-WHIPER_TOKENIZER_PATH = os.getenv("AVATER_WHIPER_PATH", None)
+WHIPER_TOKENIZER_PATH = os.getenv("AVATER_WHISPER_PATH", None)
 WAVLM_TOKENIZER_PATH = os.getenv("AVATER_WAVLM_PATH", None)
 
 
@@ -40,12 +42,13 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         audio_special_token: Optional[Dict[str, Any]] = None,
-        short_wait_string="<|SHORT_WAIT|>",
-        long_wait_string="<|LONG_WAIT|>",
-        audio_tokenizer="moshi_mimi",
-        text_duration_token=5,
-        audio_downsample_layer=2,
-        audio_encoder_sample_rate=16000,
+        short_wait_string=None,
+        long_wait_string=None,
+        audio_tokenizer=None,
+        text_duration_token=None,
+        audio_downsample_layer=None,
+        audio_encoder_sample_rate=None,
+        audio_encoder_mel_size=None,
         device="cpu",
         **kwargs
     ):
@@ -55,19 +58,10 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
                 " model use `tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)`"
             )
 
-        if not os.path.isdir(AUDIO_TOKENIZER_PATH):
-            raise ValueError(
-                f"Can't find a audio tokenizer file at path '{AUDIO_TOKENIZER_PATH}'."
-            )
-
         self.init_kwargs = copy.deepcopy(kwargs)
 
         # var init
-        self.audio_special_token = audio_special_token
-        self.short_wait_string = short_wait_string
-        self.long_wait_string = long_wait_string
         self.device = device
-        self.text_duration_token = text_duration_token
         self.verbose = True
         self.chat_template = None
         self.init_inputs = ()
@@ -78,27 +72,33 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
         self.text_tokenizer = AutoTokenizer.from_pretrained(TEXT_TOKENIZER_PATH)
 
         # audio encoder init
-        self.audio_downsample_layer = audio_downsample_layer
-        self.audio_encoder_sample_rate = audio_encoder_sample_rate
-        self.whisper_processor = AutoFeatureExtractor.from_pretrained(WHIPER_TOKENIZER_PATH)
-        self.wavlm_processor = AutoFeatureExtractor.from_pretrained(WAVLM_TOKENIZER_PATH)
+        if audio_downsample_layer:
+            self.audio_downsample_layer = audio_downsample_layer
+            self.audio_encoder_sample_rate = audio_encoder_sample_rate
+            self.audio_encoder_mel_size = audio_encoder_mel_size
+            self.whisper_processor = AutoFeatureExtractor.from_pretrained(WHIPER_TOKENIZER_PATH)
+            self.wavlm_processor = AutoFeatureExtractor.from_pretrained(WAVLM_TOKENIZER_PATH)
 
         # audio tokenizer init
-        if audio_tokenizer == "moshi_mimi":
-            from mimi import MimiTokenizer
-            self.audio_tokenizer_type = audio_tokenizer
-            self.audio_tokenizer = MimiTokenizer.load_from_checkpoint(
-                cpt_dir=AUDIO_TOKENIZER_PATH,
-                device=device
-            )
-            self.audio_duration_token = 13
-            self.code_size = 2048
-            self.code_layer = 8
-            self.audio_tokenizer_sample_rate = 24000
-        else:
-            raise NotImplementedError
-
-        self.phrase_stop_token = self.text_tokenizer.encode(f" {short_wait_string}", add_special_tokens=False)[0]
+        if audio_special_token:
+            self.audio_special_token = audio_special_token
+            self.short_wait_string = short_wait_string
+            self.long_wait_string = long_wait_string
+            self.text_duration_token = text_duration_token
+            self.phrase_stop_token = self.text_tokenizer.encode(f" {short_wait_string}", add_special_tokens=False)[0]
+            if audio_tokenizer == "moshi_mimi":
+                from mimi import MimiTokenizer
+                self.audio_tokenizer_type = audio_tokenizer
+                self.audio_tokenizer = MimiTokenizer.load_from_checkpoint(
+                    cpt_dir=AUDIO_TOKENIZER_PATH,
+                    device=device
+                )
+                self.audio_duration_token = 13
+                self.code_size = 2048
+                self.code_layer = 8
+                self.audio_tokenizer_sample_rate = 24000
+            else:
+                raise NotImplementedError
 
     def __repr__(self) -> str:
         added_tokens_decoder_rep = "\n\t".join([f"{k}: {v.__repr__()}," for k, v in self.text_tokenizer.added_tokens_decoder.items()])
@@ -109,6 +109,31 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             f" special_tokens={self.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
             " added_tokens_decoder={\n\t" + added_tokens_decoder_rep + "\n}\n)"
         )
+
+    def _encode_whisper_feature(self, signal_array, type="tensor"):
+        audio = whisper.pad_or_trim(signal_array)
+
+        # Create mel spectrogram
+        mel = whisper.log_mel_spectrogram(audio, n_mels=self.audio_encoder_mel_size, device=self.device)
+
+        # Calculate mask based on actual audio length
+        audio_length = len(signal_array)
+        n_frames = audio_length // whisper.audio.HOP_LENGTH
+        mel_mask = torch.zeros(whisper.audio.N_FRAMES, dtype=torch.int32)
+        mel_mask[:n_frames] = 1
+
+        if type=="list":
+            return {"input_features": mel.tolist(), "attention_mask": mel_mask.tolist()}
+        else:
+            return {"input_features": mel, "attention_mask": mel_mask}
+
+    def _encode_wavlm_feature(self, signal_array, type="tensor"):
+        wavlm_input = self.wavlm_processor(signal_array, sampling_rate=self.audio_encoder_sample_rate, return_attention_mask=True)
+
+        if type=="list":
+            return {"input_values": wavlm_input.input_values[0].tolist(), "attention_mask": wavlm_input.attention_mask[0].tolist()}
+        else:
+            return {"input_values": wavlm_input.input_values[0], "attention_mask": wavlm_input.attention_mask[0]}
 
     def save_pretrained(
         self,
@@ -238,19 +263,22 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             for value, pos in zip(batch_values, encoded_inputs["audio_positions"][batch_idx]):
                 # pos
                 batch_outputs["audio_positions"].append([batch_idx]+pos)
-                
+
                 # audio
                 batch_outputs["audio_features"].append(value["whisper_input"]["input_features"])
                 batch_outputs["audio_attention_mask"].append(value["whisper_input"]["attention_mask"])
 
                 # wavlm
                 pad_len = self.audio_encoder_sample_rate*30-len(value["wavlm_input"]["input_values"])
-                batch_outputs["audio_features"].append(value["wavlm_input"]["input_values"]+[0.0]*pad_len)
-                batch_outputs["audio_attention_mask"].append(value["wavlm_input"]["attention_mask"]+[0]*pad_len)
+                batch_outputs["wavlm_features"].append(value["wavlm_input"]["input_values"]+[0.0]*pad_len)
+                batch_outputs["wavlm_attention_mask"].append(value["wavlm_input"]["attention_mask"]+[0]*pad_len)
 
         # audio output
         for key in ["valid_tokens_pos", "encoder_decoder_attention_mask", "decoder_input_ids", "decoder_attention_mask", "decoder_labels"]:
             values = encoded_inputs[key]
+            if values[0] is None:
+                continue
+
             if "decoder_input_ids" == key:
                 pad_token = self.audio_special_token["eoa_token"]
             elif "decoder_labels" == key:
@@ -329,7 +357,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
     def encode(
         self,
         text: str=None,
-        audio_signal: Optional[Union[List[Dict], AudioSignal]]=None,
+        audio_signal=None,
         add_special_tokens=True,
         add_audio_special_tokens=True,
         **kwargs
@@ -348,8 +376,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
                 if isinstance(audio_signal, list):
                     codes = []
                     for signal in audio_signal:
-                        signal_data = signal["signal"] if "signal" in signal else AudioSignal(signal["file"])
-                        assert signal_data.sample_rate == self.audio_tokenizer_sample_rate, f"The sample rate of audio tokenizer should equal with {self.audio_tokenizer_sample_rate}."
+                        signal_data = torch.FloatTensor(signal["array"]).view(1, 1, -1).to(self.device)
 
                         if signal["split"] == self.long_wait_string:
                             split_token = self.audio_special_token["long_wait_token"]
@@ -358,7 +385,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
                         else:
                             split_token = None
 
-                        sub_codes = self.audio_tokenizer.encode(signal_data.audio_data.to(self.device))[0]
+                        sub_codes = self.audio_tokenizer.encode(signal_data)[0]
                         for idx, sub_code in enumerate(sub_codes):
                             code_list: list = sub_code.tolist()
 
@@ -377,8 +404,8 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
                             else:
                                 codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
                 else:
-                    assert audio_signal.sample_rate == self.audio_tokenizer_sample_rate, f"The sample rate of audio tokenizer should equal with {self.audio_tokenizer_sample_rate}."
-                    codes = self.audio_tokenizer.encode(audio_signal.audio_data.to(self.device))[0]
+                    signal_data = torch.FloatTensor(audio_signal["array"]).view(1, 1, -1).to(self.device)
+                    codes = self.audio_tokenizer.encode(signal_data)[0]
                     codes = codes.tolist()
                     for idx in range(len(codes)):
                         if add_audio_special_tokens:
@@ -392,20 +419,17 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             return text_token_ids
 
     def encode_audio_feature(self, elem: dict):
-        assert elem["type"] == "audio", f"The type of input element ({elem}) must be `audio`!"
-        signal_data: AudioSignal = elem["signal"] if "signal" in elem else AudioSignal(elem["file"])
+        assert elem["type"] == "audio", f"The type of input element ({elem}) must be `audio`."
+        signal_array = np.array(elem["array"], dtype=np.float32)
 
-        assert signal_data.sample_rate == self.audio_encoder_sample_rate, f"The sample rate of audio encoder should equal with {self.audio_encoder_sample_rate}."
-        signal_array = signal_data.audio_data.squeeze().numpy()
+        whisper_input = self._encode_whisper_feature(signal_array, type="list")
+        wavlm_input = self._encode_wavlm_feature(signal_array, type="list")
 
-        whisper_input = self.whisper_processor(signal_array, sampling_rate=self.audio_encoder_sample_rate, return_attention_mask=True)        
-        wavlm_input = self.wavlm_processor(signal_array, sampling_rate=self.audio_encoder_sample_rate, return_attention_mask=True)
-        for key in whisper_input:
-            whisper_input[key] = whisper_input[key][0].tolist()
-        for key in wavlm_input:
-            whisper_input[key] = whisper_input[key][0].tolist()
+        audio_length = get_1dconv_out_seq_lens(
+            self.audio_downsample_layer,
+            get_audio_encoder_out_seq_lens(len(signal_array))
+        )
 
-        audio_length = get_1dconv_out_seq_lens(get_audio_encoder_out_seq_lens(len(signal_array)))
         return audio_length, {"whisper_input": whisper_input, "wavlm_input": wavlm_input}
 
     def decode(

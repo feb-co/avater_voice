@@ -10,6 +10,7 @@ class LlamaTTSConfig(AvaterVoiceConfig):
     def __init__(
         self,
         audio_special_tokens=8,
+        block_step=1,
         code_size=2048,
         code_layers=8,
         tts_adapter_hidden_layers=6,
@@ -28,6 +29,7 @@ class LlamaTTSConfig(AvaterVoiceConfig):
 
         super().__init__(
             audio_special_tokens=audio_special_tokens,
+            block_step=block_step,
             code_size=code_size,
             code_layers=code_layers,
             tts_adapter_hidden_layers=tts_adapter_hidden_layers,

@@ -25,7 +25,6 @@ class LlamaASRForCausalLM(AvaterASRPreTrainedModel, GenerationMixin):
         super().__init__(config)
 
         self.config = config
-        self.audio_vocab_size = config.audio_vocab_size
 
         self.asr_encoder = ASREncoder(config)
 
@@ -64,6 +63,7 @@ class LlamaASRForCausalLM(AvaterASRPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         past_key_values: Optional[AvaterCache] = None,
+        text_labels: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -103,4 +103,14 @@ class LlamaASRForCausalLM(AvaterASRPreTrainedModel, GenerationMixin):
             cache_position=cache_position,
         )
 
-        return encoder_outputs
+        loss = None
+        if text_labels is not None:
+            loss = self.loss_function(logits=encoder_outputs.logits, labels=text_labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=encoder_outputs.logits,
+            past_key_values=encoder_outputs.past_key_values,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )

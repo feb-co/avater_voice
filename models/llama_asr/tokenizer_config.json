@@ -10,5 +10,7 @@
   "tokenizer_class": "LlamaASRTokenizer",
   "use_fast": false,
   "audio_downsample_layer": 2,
+  "audio_encoder_sample_rate": 16000,
+  "audio_encoder_mel_size": 128,
   "device": "cuda"
 }
