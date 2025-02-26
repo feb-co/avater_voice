@@ -3,7 +3,6 @@ import json
 import copy
 import torch
 import whisper
-import time
 import numpy as np
 from collections.abc import Mapping
 from typing import Union, Any, Dict, List, Optional, Tuple
@@ -256,94 +255,94 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
                 batch_outputs[key].append(outputs)
 
         # audio input
-        for batch_idx, batch_values in enumerate(encoded_inputs["audio_features"]):
-            if batch_values is None:
-                continue
+        if getattr(self, "audio_downsample_layer", None):
+            for batch_idx, batch_values in enumerate(encoded_inputs["audio_features"]):
+                if batch_values is None:
+                    continue
 
-            for value, pos in zip(batch_values, encoded_inputs["audio_positions"][batch_idx]):
-                # pos
-                batch_outputs["audio_positions"].append([batch_idx]+pos)
+                for value, pos in zip(batch_values, encoded_inputs["audio_positions"][batch_idx]):
+                    # pos
+                    batch_outputs["audio_positions"].append([batch_idx]+pos)
 
-                # audio
-                batch_outputs["audio_features"].append(value["whisper_input"]["input_features"])
-                batch_outputs["audio_attention_mask"].append(value["whisper_input"]["attention_mask"])
+                    # audio
+                    batch_outputs["audio_features"].append(value["whisper_input"]["input_features"])
+                    batch_outputs["audio_attention_mask"].append(value["whisper_input"]["attention_mask"])
 
-                # wavlm
-                pad_len = self.audio_encoder_sample_rate*30-len(value["wavlm_input"]["input_values"])
-                batch_outputs["wavlm_features"].append(value["wavlm_input"]["input_values"]+[0.0]*pad_len)
-                batch_outputs["wavlm_attention_mask"].append(value["wavlm_input"]["attention_mask"]+[0]*pad_len)
+                    # wavlm
+                    pad_len = self.audio_encoder_sample_rate*30-len(value["wavlm_input"]["input_values"])
+                    batch_outputs["wavlm_features"].append(value["wavlm_input"]["input_values"]+[0.0]*pad_len)
+                    batch_outputs["wavlm_attention_mask"].append(value["wavlm_input"]["attention_mask"]+[0]*pad_len)
 
         # audio output
-        for key in ["valid_tokens_pos", "encoder_decoder_attention_mask", "decoder_input_ids", "decoder_attention_mask", "decoder_labels"]:
-            values = encoded_inputs[key]
-            if values[0] is None:
-                continue
+        if getattr(self, "audio_special_token", None):
+            for key in ["valid_tokens_pos", "encoder_decoder_attention_mask", "decoder_input_ids", "decoder_attention_mask", "decoder_labels"]:
+                values = encoded_inputs[key]
 
-            if "decoder_input_ids" == key:
-                pad_token = self.audio_special_token["eoa_token"]
-            elif "decoder_labels" == key:
-                pad_token = -100
-            else:
-                pad_token = 0
+                if "decoder_input_ids" == key:
+                    pad_token = self.audio_special_token["eoa_token"]
+                elif "decoder_labels" == key:
+                    pad_token = -100
+                else:
+                    pad_token = 0
 
-            if key in ("valid_tokens_pos", "decoder_attention_mask"):
-                try:
-                    max_length = max([len(item) for item in values if item])
-                except:
-                    continue
-                for value in values:
-                    if value is None and key == "decoder_attention_mask":
-                        value = [1 for _ in range(max_length)]
-                    elif value is None:
-                        value = []
+                if key in ("valid_tokens_pos", "decoder_attention_mask"):
+                    try:
+                        max_length = max([len(item) for item in values if item])
+                    except:
+                        continue
+                    for value in values:
+                        if value is None and key == "decoder_attention_mask":
+                            value = [1 for _ in range(max_length)]
+                        elif value is None:
+                            value = []
 
-                    difference = max_length - len(value)
-                    if padding_side == "right":
-                        outputs = value + [pad_token] * difference
-                    elif padding_side == "left":
-                        outputs = [pad_token] * difference + value
-                    else:
-                        raise ValueError(f"Invalid padding strategy: {padding_side}")
-
-                    batch_outputs[key].append(outputs)
-            elif key in ("decoder_input_ids", "decoder_labels",):
-                try:
-                    max_length = max([len(item[0]) for item in values if item])
-                except:
-                    continue
-                for layer_idx, value in enumerate(values):
-                    if value is None:
-                        value = [[] for _ in range(self.code_layer)]
-
-                    outputs = []
-                    difference = max_length - len(value[0])
-                    for out in value:
+                        difference = max_length - len(value)
                         if padding_side == "right":
-                            out = out + [pad_token] * difference
+                            outputs = value + [pad_token] * difference
                         elif padding_side == "left":
-                            out = [pad_token] * difference + out
+                            outputs = [pad_token] * difference + value
                         else:
-                            raise ValueError(f"Invalid padding strategy:{padding_side}")
+                            raise ValueError(f"Invalid padding strategy: {padding_side}")
 
-                        outputs.append(out)
-                    batch_outputs[key].append(outputs)
-            elif key in ("encoder_decoder_attention_mask",):
-                try:
-                    max_length = [
-                        max([len(item) for item in values if item]),
-                        max([len(item[0]) for item in values if item]),
-                    ]
-                except:
-                    continue
-                for value in values:
-                    if value is not None:
-                        outputs = torch.zeros(max_length, dtype=torch.long)
-                        outputs[:len(value), :len(value[0])] = torch.LongTensor(value)
-                    else:
-                        outputs = torch.ones(max_length, dtype=torch.long)
-                    batch_outputs[key].append(outputs.tolist())
-            else:
-                raise ValueError(f"Invalid key padding strategy: {key}")
+                        batch_outputs[key].append(outputs)
+                elif key in ("decoder_input_ids", "decoder_labels",):
+                    try:
+                        max_length = max([len(item[0]) for item in values if item])
+                    except:
+                        continue
+                    for layer_idx, value in enumerate(values):
+                        if value is None:
+                            value = [[] for _ in range(self.code_layer)]
+
+                        outputs = []
+                        difference = max_length - len(value[0])
+                        for out in value:
+                            if padding_side == "right":
+                                out = out + [pad_token] * difference
+                            elif padding_side == "left":
+                                out = [pad_token] * difference + out
+                            else:
+                                raise ValueError(f"Invalid padding strategy:{padding_side}")
+
+                            outputs.append(out)
+                        batch_outputs[key].append(outputs)
+                elif key in ("encoder_decoder_attention_mask",):
+                    try:
+                        max_length = [
+                            max([len(item) for item in values if item]),
+                            max([len(item[0]) for item in values if item]),
+                        ]
+                    except:
+                        continue
+                    for value in values:
+                        if value is not None:
+                            outputs = torch.zeros(max_length, dtype=torch.long)
+                            outputs[:len(value), :len(value[0])] = torch.LongTensor(value)
+                        else:
+                            outputs = torch.ones(max_length, dtype=torch.long)
+                        batch_outputs[key].append(outputs.tolist())
+                else:
+                    raise ValueError(f"Invalid key padding strategy: {key}")
 
         # remove empty field
         for key in list(batch_outputs.keys()):
