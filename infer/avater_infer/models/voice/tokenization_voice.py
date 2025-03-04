@@ -134,6 +134,20 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
         else:
             return {"input_values": wavlm_input.input_values[0], "attention_mask": wavlm_input.attention_mask[0]}
 
+    def _encode_mimi_codes(self, audio_array):
+        signal_data = torch.FloatTensor(audio_array).view(1, 1, -1).to(self.device)
+        hop = self.audio_tokenizer_sample_rate * 18
+        step = 0
+        codes_tensor = []
+        with torch.inference_mode():
+            for offset in range(0, signal_data.shape[-1], hop):
+                offset_l = max(offset-step, 0)
+                offset_r = max(offset+hop+step, 0)
+                codes = self.audio_tokenizer.encode(signal_data[:, :, offset_l: offset_r])[0]
+                codes_tensor.append(codes)
+            codes_tensor = torch.cat(codes_tensor, dim=-1)
+        return codes_tensor
+
     def save_pretrained(
         self,
         save_directory: Union[str, os.PathLike],
@@ -371,47 +385,43 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             text_token_ids = None
 
         if audio_signal:
-            with torch.no_grad():
-                if isinstance(audio_signal, list):
-                    codes = []
-                    for signal in audio_signal:
-                        signal_data = torch.FloatTensor(signal["array"]).view(1, 1, -1).to(self.device)
+            if isinstance(audio_signal, list):
+                codes = []
+                for signal in audio_signal:
+                    if signal["split"] == self.long_wait_string:
+                        split_token = self.audio_special_token["long_wait_token"]
+                    elif signal["split"] == self.short_wait_string:
+                        split_token = self.audio_special_token["short_wait_token"]
+                    else:
+                        split_token = None
 
-                        if signal["split"] == self.long_wait_string:
-                            split_token = self.audio_special_token["long_wait_token"]
-                        elif signal["split"] == self.short_wait_string:
-                            split_token = self.audio_special_token["short_wait_token"]
+                    sub_codes = self._encode_mimi_codes(signal["array"])
+                    for idx, sub_code in enumerate(sub_codes):
+                        code_list: list = sub_code.tolist()
+
+                        if split_token:
+                            code_list.insert(0, split_token)
+
+                        if len(codes) != len(sub_codes):
+                            codes.append(code_list)
                         else:
-                            split_token = None
+                            codes[idx] += code_list
 
-                        sub_codes = self.audio_tokenizer.encode(signal_data)[0]
-                        for idx, sub_code in enumerate(sub_codes):
-                            code_list: list = sub_code.tolist()
-
-                            if split_token:
-                                code_list.insert(0, split_token)
-
-                            if len(codes) != len(sub_codes):
-                                codes.append(code_list)
-                            else:
-                                codes[idx] += code_list
-
-                    for idx in range(len(codes)):
-                        if add_audio_special_tokens:
-                            if idx == 0:
-                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
-                            else:
-                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
-                else:
-                    signal_data = torch.FloatTensor(audio_signal["array"]).view(1, 1, -1).to(self.device)
-                    codes = self.audio_tokenizer.encode(signal_data)[0]
-                    codes = codes.tolist()
-                    for idx in range(len(codes)):
-                        if add_audio_special_tokens:
-                            if idx == 0:
-                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
-                            else:
-                                codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                for idx in range(len(codes)):
+                    if add_audio_special_tokens:
+                        if idx == 0:
+                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                        else:
+                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+            else:
+                codes = self._encode_mimi_codes(audio_signal["array"])
+                codes = codes.tolist()
+                for idx in range(len(codes)):
+                    if add_audio_special_tokens:
+                        if idx == 0:
+                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                        else:
+                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
 
             return (text_token_ids, codes)
         else:
