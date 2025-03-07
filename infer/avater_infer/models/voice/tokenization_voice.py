@@ -180,16 +180,24 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             "name_or_path": "avater-tokenizer",
             "add_prefix_space": False,
             "use_fast": False,
-            "short_wait_string": self.short_wait_string,
-            "long_wait_string": self.long_wait_string,
-            "audio_tokenizer": self.audio_tokenizer_type,
-            "text_duration_token": self.text_duration_token,
-            "audio_special_token": self.audio_special_token,
-            "audio_downsample_layer": self.audio_downsample_layer,
-            "audio_encoder_sample_rate": self.audio_encoder_sample_rate,
-            "audio_tokenizer_sample_rate": self.audio_tokenizer_sample_rate,
             "device": self.device
         })
+
+        if getattr(self, "audio_special_token", None):
+            tokenizer_config.update({
+                "short_wait_string": self.short_wait_string,
+                "long_wait_string": self.long_wait_string,
+                "audio_tokenizer": self.audio_tokenizer_type,
+                "text_duration_token": self.text_duration_token,
+                "audio_special_token": self.audio_special_token,
+            })
+
+        if getattr(self, "audio_downsample_layer", None):
+            tokenizer_config.update({
+                "audio_downsample_layer": self.audio_downsample_layer,
+                "audio_encoder_sample_rate": self.audio_encoder_sample_rate,
+                "audio_encoder_mel_size": self.audio_encoder_mel_size,
+            })
 
         tokenizer_class = self.__class__.__name__
         # Remove the Fast at the end unless we have a special `PreTrainedTokenizerFast`

@@ -1,6 +1,7 @@
 import os
 import sys
 import torch
+import soundfile as sf
 from audiotools import AudioSignal
 
 
@@ -65,9 +66,10 @@ Please repeat the following user's input (which may contain the two special symb
     # import pdb; pdb.set_trace()
 
     # signal = AudioSignal("/mnt/ceph/licheng/azure_1_24.wav")
-    signal = AudioSignal("/mnt/ceph/licheng/1a55d9a4-e90a-11ef-86a7-4a67e220d664.wav")
+    # signal = AudioSignal("/mnt/ceph/licheng/1a55d9a4-e90a-11ef-86a7-4a67e220d664.wav")
+    array, sampling_rate = sf.read("/mnt/ceph/licheng/1a55d9a4-e90a-11ef-86a7-4a67e220d664.wav")
     # signal = AudioSignal("/mnt/ceph/licheng/voice_experiment/TTS/data/synthesis_data/chat_faq/waves/f3530414a89811efb0c64a67e220d664.wav")
-    _, codes = tokenizer.encode(text=None, audio_signal=signal)
+    _, codes = tokenizer.encode(text=None, audio_signal={"array": array})
     print(len(codes[0]), codes, flush=True)
 
     # init encoder input
@@ -76,19 +78,19 @@ Please repeat the following user's input (which may contain the two special symb
     input_ids = torch.LongTensor([prefix_input_ids+text_input_ids])
     valid_tokens_pos=torch.arange(len(prefix_input_ids), len(prefix_input_ids)+len(text_input_ids)).view(1, -1).to(input_ids)
 
-    inputs = {
-        "labels": None,
-        "input_ids": input_ids.to(model.device),
-        "attention_mask": None,
-        "valid_tokens_pos": valid_tokens_pos.to(model.device),
-        "decoder_input_ids": torch.LongTensor([codes]).to(model.device),
-        "decoder_attention_mask": None,
-        "encoder_decoder_attention_mask": torch.LongTensor([tokenizer.convert_t2a_attention_mask(text_input_ids, codes)]).to(model.device),
-        "decoder_labels": torch.LongTensor([codes]).to(model.device)
-    }
-    with torch.no_grad():
-        output = model(**inputs)
-    print("------", output.loss, flush=True)
+    # inputs = {
+    #     "labels": None,
+    #     "input_ids": input_ids.to(model.device),
+    #     "attention_mask": None,
+    #     "valid_tokens_pos": valid_tokens_pos.to(model.device),
+    #     "decoder_input_ids": torch.LongTensor([codes]).to(model.device),
+    #     "decoder_attention_mask": None,
+    #     "encoder_decoder_attention_mask": torch.LongTensor([tokenizer.convert_t2a_attention_mask(text_input_ids, codes)]).to(model.device),
+    #     "decoder_labels": torch.LongTensor([codes]).to(model.device)
+    # }
+    # with torch.no_grad():
+    #     output = model(**inputs)
+    # print("------", output.loss, flush=True)
 
     # init decoder input
     decoder_input_ids = torch.LongTensor([tokenizer.audio_special_token["boa_token"]] * model.config.code_layers)
@@ -128,8 +130,8 @@ if __name__ == "__main__":
     tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
     inference_tts(
         model, tokenizer, generation_config,
-        # "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
+        "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
         # "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
         # "That's great. And, uh, thank you for talking with me."
-        "Hi, I am Ray Dalio! hahaha"
+        # "Hi, I am Ray Dalio! fuck! who are you?"
     )
