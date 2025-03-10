@@ -18,7 +18,7 @@ from avater_infer.cache_utils import AvaterCache
 
 TEXT_TOKENIZER_PATH = os.getenv("AVATER_TEXT_TOKENIZER_PATH", None)
 AUDIO_TOKENIZER_PATH = os.getenv("AVATER_AUDIO_TOKENIZER_PATH", None)
-WHIPER_TOKENIZER_PATH = os.getenv("AVATER_WHISPER_PATH", None)
+WHISPER_TOKENIZER_PATH = os.getenv("AVATER_WHISPER_PATH", None)
 WAVLM_TOKENIZER_PATH = os.getenv("AVATER_WAVLM_PATH", None)
 
 
@@ -276,7 +276,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             self.audio_downsample_layer = audio_downsample_layer
             self.audio_encoder_sample_rate = audio_encoder_sample_rate
             self.audio_encoder_mel_size = audio_encoder_mel_size
-            self.whisper_processor = AutoFeatureExtractor.from_pretrained(WHIPER_TOKENIZER_PATH)
+            self.whisper_processor = AutoFeatureExtractor.from_pretrained(WHISPER_TOKENIZER_PATH)
             self.wavlm_processor = AutoFeatureExtractor.from_pretrained(WAVLM_TOKENIZER_PATH)
 
         # audio tokenizer init
@@ -439,7 +439,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
 
         if getattr(self, "_auto_map", None) is not None:
             tokenizer_config["auto_map"] = self._auto_map
-        
+
         # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
         # loaded from the Hub.
         if self._auto_class is not None:

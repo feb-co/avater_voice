@@ -5,11 +5,12 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 from transformers.utils import logging
+from transformers import AutoModelForCausalLM
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
-from avater_infer.models.voice import ASREncoder, TTSAdapter, AvaterVoicePreTrainedModel
+from avater_infer.models.voice import AvaterVoicePreTrainedModel
 from avater_infer.cache_utils import AvaterCache
 from avater_infer.modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions, Seq2SeqCausalLMOutputWithCrossAttentions
 
@@ -35,9 +36,9 @@ class LlamaVoiceForCausalLM(AvaterVoicePreTrainedModel, GenerationMixin):
             self.llm: LlamaForCausalLM = LlamaForCausalLM(config)
 
         if config.tts_path:
-            self.tts_adapter = TTSAdapter.from_pretrained(config.tts_path).tts_adapter
+            self.tts_adapter = AutoModelForCausalLM.from_pretrained(config.tts_path, trust_remote_code=True).tts_adapter
         else:
-            self.tts_adapter = TTSAdapter(config).tts_adapter
+            self.tts_adapter = AutoModelForCausalLM(config, trust_remote_code=True).tts_adapter
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -47,6 +48,9 @@ class LlamaVoiceForCausalLM(AvaterVoicePreTrainedModel, GenerationMixin):
 
     def get_encoder(self,):
         return self.llm
+    
+    def forward_llm(self,):
+        pass
 
     def forward(
         self,

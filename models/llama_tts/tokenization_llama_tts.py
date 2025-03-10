@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Optional
 
 from avater_infer.models.voice import AvaterVoiceTokenizer
