@@ -1,0 +1,11 @@
+{
+    "architectures": [
+      "LlamaVoiceForCausalLM"
+    ],
+    "auto_map": {
+      "AutoConfig": "configuration_llama_voice.LlamaVoiceConfig",
+      "AutoModel": "modeling_llama_voice.LlamaVoiceForCausalLM",
+      "AutoModelForCausalLM": "modeling_llama_voice.LlamaVoiceForCausalLM"
+    },
+    "torch_dtype": "bfloat16"
+}

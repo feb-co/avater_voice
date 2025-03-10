@@ -26,6 +26,10 @@ class LlamaTTSConfig(AvaterVoiceConfig):
     ):
         if "llm_path" in kwargs:
             del kwargs["llm_path"]
+        if "whisper_path" in kwargs:
+            del kwargs["whisper_path"]
+        if "wavlm_path" in kwargs:
+            del kwargs["wavlm_path"]
 
         super().__init__(
             audio_special_tokens=audio_special_tokens,

@@ -9,8 +9,11 @@ from typing import Union, Any, Dict, List, Optional, Tuple
 
 from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer, EncodedInput, PaddingStrategy, TOKENIZER_CONFIG_FILE
 from transformers.utils import TensorType
+from transformers.cache_utils import DynamicCache
 from transformers.dynamic_module_utils import custom_object_save
 from transformers import AutoTokenizer, AutoFeatureExtractor
+
+from avater_infer.cache_utils import AvaterCache
 
 
 TEXT_TOKENIZER_PATH = os.getenv("AVATER_TEXT_TOKENIZER_PATH", None)
@@ -37,6 +40,202 @@ def get_1dconv_out_seq_lens(n_layers, in_seq_lens):
         return out
 
 
+def generate_chat_template(messages, custom_tools=None, builtin_tools=None, date_string="26 Jul 2024", add_generation_prompt=False):
+    # Initialize variables
+    tools_in_user_message = True
+    tools = custom_tools if custom_tools is not None else None
+    system_message = ""
+
+    # Extract system message
+    if messages and messages[0]['role'] == 'system':
+        system_message = messages[0]['content'].strip()
+        messages = messages[1:]
+    
+    # Build template string
+    template = "<|start_header_id|>system<|end_header_id|>\n\n"
+    
+    if builtin_tools or tools is not None:
+        template += "Environment: ipython\n"
+    
+    if builtin_tools:
+        tools_list = [tool for tool in builtin_tools if tool != 'code_interpreter']
+        template += f"Tools: {', '.join(tools_list)}\n\n"
+    
+    template += f"Cutting Knowledge Date: December 2023\nToday Date: {date_string}\n\n"
+    
+    if tools is not None and not tools_in_user_message:
+        template += (
+            "You have access to the following functions. To call a function, please respond with JSON for a function call.\n"
+            "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}.\n"
+            "Do not use variables.\n\n"
+        )
+        for tool in tools:
+            template += f"{tool}\n\n"
+    
+    template += system_message + "<|eot_id|>\n\n"
+    
+    if tools_in_user_message and tools is not None:
+        if messages:
+            first_user_message = messages[0]['content'].strip()
+            messages = messages[1:]
+        else:
+            raise Exception("Cannot put tools in the first user message when there's no first user message!")
+        
+        template += (
+            "<|start_header_id|>user<|end_header_id|>\n\n"
+            "Given the following functions, please respond with a JSON for a function call "
+            "with its proper arguments that best answers the given prompt.\n\n"
+            "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}.\n"
+            "Do not use variables.\n\n"
+        )
+        for tool in tools:
+            template += f"{tool}\n\n"
+        
+        template += first_user_message + "<|eot_id|>\n"
+    
+    for message in messages:
+        if message['role'] not in ['ipython', 'tool'] and 'tool_calls' not in message:
+            template += f"<|start_header_id|>{message['role']}<|end_header_id|>\n\n{message['content'].strip()}<|eot_id|>\n"
+        elif 'tool_calls' in message:
+            if len(message['tool_calls']) != 1:
+                raise Exception("This model only supports single tool-calls at once!")
+            
+            tool_call = message['tool_calls'][0]['function']
+            if builtin_tools and tool_call['name'] in builtin_tools:
+                template += f"<|start_header_id|>assistant<|end_header_id|>\n\n<|python_tag|>{tool_call['name']}.call("
+                template += ", ".join(f'{arg_name}="{arg_val}"' for arg_name, arg_val in tool_call['arguments'].items())
+                template += ")"
+            else:
+                template += f"<|start_header_id|>assistant<|end_header_id|>\n\n{{\"name\": \"{tool_call['name']}\", \"parameters\": {tool_call['arguments']}}}"
+            
+            template += "<|eom_id|>" if builtin_tools else "<|eot_id|>"
+        elif message['role'] in ["tool", "ipython"]:
+            template += "<|start_header_id|>ipython<|end_header_id|>\n\n"
+            content = message['content']
+            if isinstance(content, (dict, list)):
+                template += json.dumps(content)
+            else:
+                template += content
+            template += "<|eot_id|>\n"
+    
+    if add_generation_prompt:
+        template += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    
+    return template
+
+
+def get_jinja_template():
+    return """{{- bos_token }}
+{%- if custom_tools is defined %}
+    {%- set tools = custom_tools %}
+{%- endif %}
+{%- if not tools_in_user_message is defined %}
+    {%- set tools_in_user_message = true %}
+{%- endif %}
+{%- if not date_string is defined %}
+    {%- set date_string = "26 Jul 2024" %}
+{%- endif %}
+{%- if not tools is defined %}
+    {%- set tools = none %}
+{%- endif %}
+
+{#- This block extracts the system message, so we can slot it into the right place. #}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content']|trim %}
+    {%- set messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "" %}
+{%- endif %}
+
+{#- System message + builtin tools #}
+{{- "<|start_header_id|>system<|end_header_id|>\\n\\n" }}
+{%- if builtin_tools is defined or tools is not none %}
+    {{- "Environment: ipython\\n" }}
+{%- endif %}
+{%- if builtin_tools is defined %}
+    {{- "Tools: " + builtin_tools | reject('equalto', 'code_interpreter') | join(", ") + "\\n\\n"}}
+{%- endif %}
+{{- "Cutting Knowledge Date: December 2023\\n" }}
+{{- "Today Date: " + date_string + "\\n\\n" }}
+{%- if tools is not none and not tools_in_user_message %}
+    {{- "You have access to the following functions. To call a function, please respond with JSON for a function call." }}
+    {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
+    {{- "Do not use variables.\\n\\n" }}
+    {%- for t in tools %}
+        {{- t | tojson(indent=4) }}
+        {{- "\\n\\n" }}
+    {%- endfor %}
+{%- endif %}
+{{- system_message }}
+{{- "<|eot_id|>" }}
+
+{#- Custom tools are passed in a user message with some extra guidance #}
+{%- if tools_in_user_message and not tools is none %}
+    {#- Extract the first user message so we can plug it in here #}
+    {%- if messages | length != 0 %}
+        {%- set first_user_message = messages[0]['content']|trim %}
+        {%- set messages = messages[1:] %}
+    {%- else %}
+        {{- raise_exception("Cannot put tools in the first user message when there's no first user message!") }}
+{%- endif %}
+    {{- '<|start_header_id|>user<|end_header_id|>\\n\\n' -}}
+    {{- "Given the following functions, please respond with a JSON for a function call " }}
+    {{- "with its proper arguments that best answers the given prompt.\\n\\n" }}
+    {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
+    {{- "Do not use variables.\\n\\n" }}
+    {%- for t in tools %}
+        {{- t | tojson(indent=4) }}
+        {{- "\\n\\n" }}
+    {%- endfor %}
+    {{- first_user_message + "<|eot_id|>"}}
+{%- endif %}
+
+{%- for message in messages %}
+    {%- if not (message.role == 'ipython' or message.role == 'tool' or 'tool_calls' in message) %}
+        {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'+ message['content'] | trim + '<|eot_id|>' }}
+    {%- elif 'tool_calls' in message %}
+        {%- if not message.tool_calls|length == 1 %}
+            {{- raise_exception("This model only supports single tool-calls at once!") }}
+        {%- endif %}
+        {%- set tool_call = message.tool_calls[0].function %}
+        {%- if builtin_tools is defined and tool_call.name in builtin_tools %}
+            {{- '<|start_header_id|>assistant<|end_header_id|>\\n\\n' -}}
+            {{- "<|python_tag|>" + tool_call.name + ".call(" }}
+            {%- for arg_name, arg_val in tool_call.arguments | items %}
+                {{- arg_name + '="' + arg_val + '"' }}
+                {%- if not loop.last %}
+                    {{- ", " }}
+                {%- endif %}
+                {%- endfor %}
+            {{- ")" }}
+        {%- else  %}
+            {{- '<|start_header_id|>assistant<|end_header_id|>\\n\\n' -}}
+            {{- '{"name": "' + tool_call.name + '", ' }}
+            {{- '"parameters": ' }}
+            {{- tool_call.arguments | tojson }}
+            {{- "}" }}
+        {%- endif %}
+        {%- if builtin_tools is defined %}
+            {#- This means we're in ipython mode #}
+            {{- "<|eom_id|>" }}
+        {%- else %}
+            {{- "<|eot_id|>" }}
+        {%- endif %}
+    {%- elif message.role == "tool" or message.role == "ipython" %}
+        {{- "<|start_header_id|>ipython<|end_header_id|>\\n\\n" }}
+        {%- if message.content is mapping or message.content is iterable %}
+            {{- message.content | tojson }}
+        {%- else %}
+            {{- message.content }}
+        {%- endif %}
+        {{- "<|eot_id|>" }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}
+{%- endif %}"""
+
+
 class AvaterVoiceTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
@@ -49,6 +248,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
         audio_encoder_sample_rate=None,
         audio_encoder_mel_size=None,
         device="cpu",
+        chat_template=None,
         **kwargs
     ):
         if not os.path.isdir(TEXT_TOKENIZER_PATH):
@@ -62,13 +262,14 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
         # var init
         self.device = device
         self.verbose = True
-        self.chat_template = None
+        self.chat_template = chat_template if chat_template else get_jinja_template()
         self.init_inputs = ()
         for attr in self.SPECIAL_TOKENS_ATTRIBUTES:
             setattr(self, attr, None)
 
         # text tokenizer init
         self.text_tokenizer = AutoTokenizer.from_pretrained(TEXT_TOKENIZER_PATH)
+        self.bos_token = self.text_tokenizer.bos_token
 
         # audio encoder init
         if audio_downsample_layer:
@@ -108,6 +309,35 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             f" special_tokens={self.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
             " added_tokens_decoder={\n\t" + added_tokens_decoder_rep + "\n}\n)"
         )
+
+    def __call__(
+        self,
+        formatted_chat: str=None,
+        add_special_tokens: bool= True,
+        return_tensors: Optional[Union[str, TensorType]] = None,
+        **kwargs,
+    ) -> BatchEncoding:
+        batch_outputs = {}
+
+        # init llm input
+        input_ids = self.encode(formatted_chat, add_special_tokens=add_special_tokens)
+
+        # init tts adapter input
+        decoder_input_ids = [[self.audio_special_token["boa_token"]] for _ in range(self.code_layer)]
+
+        # init cache
+        past_key_values = AvaterCache(
+            DynamicCache(),
+            DynamicCache(),
+            DynamicCache(),
+        )
+
+        # merge output
+        batch_outputs["input_ids"] = [input_ids]
+        batch_outputs["decoder_input_ids"] = [decoder_input_ids]
+        batch_outputs["past_key_values"] = past_key_values
+        batch_outputs = BatchEncoding(batch_outputs, tensor_type=return_tensors)
+        return batch_outputs
 
     def _encode_whisper_feature(self, signal_array, type="tensor"):
         audio = whisper.pad_or_trim(signal_array)
@@ -180,7 +410,9 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             "name_or_path": "avater-tokenizer",
             "add_prefix_space": False,
             "use_fast": False,
-            "device": self.device
+            "device": self.device,
+            "chat_template": self.chat_template,
+            "bos_token": self.bos_token
         })
 
         if getattr(self, "audio_special_token", None):

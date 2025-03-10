@@ -1,0 +1,30 @@
+{
+    "name_or_path": "LlamaVoiceTokenizer",
+    "auto_map": {
+      "AutoTokenizer": [
+        "tokenization_llama_voice.LlamaVoiceTokenizer",
+        null
+        ]
+    },
+    "add_prefix_space": false,
+    "tokenizer_class": "LlamaVoiceTokenizer",
+    "use_fast": false,
+    "audio_downsample_layer": 2,
+    "audio_encoder_sample_rate": 16000,
+    "audio_encoder_mel_size": 128,
+    "short_wait_string": "<|SHORT_WAIT|>",
+    "long_wait_string": "<|LONG_WAIT|>",
+    "audio_tokenizer": "moshi_mimi",
+    "text_duration_token": 10,
+    "audio_special_token": {
+      "boa_token": 2048,
+      "eoa_token": 2049,
+      "short_wait_token": 2050,
+      "long_wait_token": 2051,
+      "<|reserved_special_token_0|>": 2052,
+      "<|reserved_special_token_1|>": 2053,
+      "<|reserved_special_token_2|>": 2054,
+      "<|reserved_special_token_3|>": 2055
+    },
+    "device": "cuda"
+  }

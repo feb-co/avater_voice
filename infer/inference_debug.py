@@ -4,13 +4,7 @@ import torch
 import soundfile as sf
 from audiotools import AudioSignal
 
-
-os.environ["AVATER_LLM_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
-os.environ["AVATER_TEXT_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
-os.environ["AVATER_AUDIO_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/AvateAduio-tokenizer"
-
-
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, AutoConfig
 from transformers.cache_utils import DynamicCache
 
 from avater_infer.models.patcher import patch_model, patch_init
@@ -30,18 +24,18 @@ audio_generation_config = {
 }
 
 
-
 def load_model_tokenizer(model_path):
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     generation_config = GenerationConfig.from_dict(audio_generation_config)
     model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
 
     patch_init(model, tokenizer)
-    model, tokenizer = patch_model(model, tokenizer)
     return tokenizer, model, generation_config
 
 
 def inference_tts(model, tokenizer, generation_config, input_text):
+    model, tokenizer = patch_model(model, tokenizer)
+
     prefix_text_template = """<|start_header_id|>system<|end_header_id|>
 
 You are a helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
@@ -124,14 +118,39 @@ Please repeat the following user's input (which may contain the two special symb
     audio.write("/mnt/ceph/licheng/test.wav")
 
 
+def inference_voice_chat_t1a2(model, tokenizer, generation_config, chat):
+    formatted_chat = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(formatted_chat, return_tensors="pt", add_special_tokens=False)
+    outputs = model.generate(**inputs, voice_tokenizer=tokenizer, generation_config=generation_config)
+
+
+
 if __name__ == "__main__":
     model_name_and_path = sys.argv[1]
 
+    # TTS Task
+    # os.environ["AVATER_LLM_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
+    # os.environ["AVATER_TEXT_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
+    # os.environ["AVATER_AUDIO_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/AvateAduio-tokenizer"
+    # tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
+    # inference_tts(
+    #     model, tokenizer, generation_config,
+    #     "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
+    #     # "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
+    #     # "That's great. And, uh, thank you for talking with me."
+    #     # "Hi, I am Ray Dalio! fuck! who are you?"
+    # )
+
+
+    # Voice Chat T1A2 Task
+    os.environ["AVATER_TEXT_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
+    os.environ["AVATER_AUDIO_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/AvateAduio-tokenizer"
+    os.environ["AVATER_TTS_PATH"] = "/mnt/ceph/licheng/chat_model/tts/llama3.1_tts_8b/tts_2502_synthesis_from_sft/"
     tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
-    inference_tts(
+    inference_voice_chat_t1a2(
         model, tokenizer, generation_config,
-        "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
-        # "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
-        # "That's great. And, uh, thank you for talking with me."
-        # "Hi, I am Ray Dalio! fuck! who are you?"
+        [
+            {"role": "system", "content": "You are Ray Dalio"},
+            {"role": "user", "content": "hi"}
+        ]
     )

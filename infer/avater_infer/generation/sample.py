@@ -20,6 +20,52 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
+def prepare_inputs_for_generation(
+    input_ids: torch.LongTensor,
+    past_key_values: Optional[Cache] = None,
+    attention_mask: Optional[torch.LongTensor] = None,
+    is_encoder_decoder: bool=False,
+    voice_tokenizer=None,
+    **kwargs,
+):
+    """
+    Prepare the model inputs for generation. In includes operations like computing the 4D attention mask or
+    slicing inputs given the existing cache.
+
+    See the forward pass in the model documentation for expected arguments (different models might have different
+    requirements for e.g. `past_key_values`). This function should work as is for most LLMs.
+    """
+    model_inputs = {}
+
+    # 1. KV-Cache
+    if past_key_values is not None:
+        model_inputs["past_key_values"] = past_key_values
+
+    # 2. Model Input
+    if not is_encoder_decoder:
+        model_inputs["input_ids"] = input_ids.clone(memory_format=torch.contiguous_format)
+        model_inputs["decoder_input_ids"] = kwargs.get("decoder_input_ids")
+    else:
+        model_inputs["decoder_input_ids"] = input_ids.clone(memory_format=torch.contiguous_format)
+
+    # 3. Attention Mask
+    model_inputs["attention_mask"] = attention_mask
+    if is_encoder_decoder:
+        encoder_decoder_attention_mask = torch.LongTensor([voice_tokenizer.convert_t2a_attention_mask(
+            kwargs["text_input_ids"], model_inputs["decoder_input_ids"], remove_assert=True
+        )]).to(model_inputs["decoder_input_ids"])
+        model_inputs["encoder_decoder_attention_mask"] = encoder_decoder_attention_mask[:, -1:, :]
+
+    # 7. Forward ALL kwargs that are uninitialized (e.g. `use_cache`).
+    for key, value in kwargs.items():
+        if key not in model_inputs:
+            model_inputs[key] = value
+
+    # 8. Remove unexpected `generate` inputs (TODO @joao: fix trainer and examples)
+    model_inputs.pop("labels", None)
+    return model_inputs
+
+
 def sample(
     self,
     input_ids: torch.LongTensor,
@@ -72,7 +118,6 @@ def sample(
     max_length = generation_config.max_length
     has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
     do_sample = generation_config.do_sample
-    voice_tokenizer = model_kwargs["voice_tokenizer"]
 
     # init attention / hidden states / scores tuples
     scores = () if (return_dict_in_generate and output_scores) else None
@@ -92,15 +137,12 @@ def sample(
     batch_size, cur_len = input_ids.shape
     this_peer_finished = False
     unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
-    model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
     while self._has_unfinished_sequences(
         this_peer_finished, synced_gpus, device=input_ids.device, cur_len=cur_len, max_length=max_length
     ):
         # prepare model inputs
-        model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-        encoder_decoder_attention_mask = torch.LongTensor([voice_tokenizer.convert_t2a_attention_mask(model_kwargs["text_input_ids"], input_ids, remove_assert=True)]).to(self.device)
-        model_inputs["encoder_decoder_attention_mask"] = encoder_decoder_attention_mask[:, -1:, :]
+        model_inputs = prepare_inputs_for_generation(input_ids, **model_kwargs)
 
         # prepare variable output controls (note: some models won't accept all output controls)
         model_inputs.update({"output_attentions": output_attentions} if output_attentions else {})
