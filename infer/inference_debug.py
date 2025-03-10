@@ -4,37 +4,11 @@ import torch
 import soundfile as sf
 from audiotools import AudioSignal
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig, AutoConfig
 from transformers.cache_utils import DynamicCache
 
-from avater_infer.models.patcher import patch_model, patch_init
+from avater_infer.models.patcher import patch_model
 from avater_infer.cache_utils import AvaterCache
 
-
-audio_generation_config = {
-  "do_sample": True,
-  "temperature": 0.01,
-  "top_p": 0.01,
-  "_from_model_config": True,
-  "bos_token_id": 128000,
-  "eos_token_id": 2049,
-  "decoder_start_token_id": 2048,
-  "output_hidden_states": True,
-  "max_length": 512
-}
-
-
-def load_model_tokenizer(model_path):
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    generation_config = GenerationConfig.from_dict(audio_generation_config)
-    try:
-        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
-    except:
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, torch_dtype=torch.bfloat16)
-
-    patch_init(model, tokenizer)
-    return tokenizer, model, generation_config
 
 
 def inference_tts(model, tokenizer, generation_config, input_text):
@@ -153,9 +127,8 @@ if __name__ == "__main__":
     os.environ["AVATER_TTS_PATH"] = "/mnt/ceph/licheng/chat_model/tts/llama3.1_tts_8b/tts_2502_synthesis_from_sft/checkpoint-25000/"
     os.environ["AVATER_WHISPER_PATH"] = "/mnt/ceph/huggingface/whisper-large-v3/"
     os.environ["AVATER_WAVLM_PATH"] = "/mnt/ceph/huggingface/wavlm-large/"
-    tokenizer, model, generation_config = load_model_tokenizer(model_name_and_path)
     inference_voice_chat_t1a2(
-        model, tokenizer, generation_config,
+        model_name_and_path,
         [
             {"role": "system", "content": "You are Ray Dalio"},
             {"role": "user", "content": "hi"}

@@ -1,5 +1,7 @@
 import os
+import torch
 
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from transformers.modeling_utils import (
     _add_variant,
     SAFE_WEIGHTS_NAME,
@@ -8,6 +10,7 @@ from transformers.modeling_utils import (
     WEIGHTS_INDEX_NAME,
 )
 
+from avater_infer.models.patcher import patch_init
 
 
 def get_archive_file(
@@ -54,3 +57,15 @@ def get_archive_file(
         )
     
     return archive_file, is_sharded
+
+
+def load_model_tokenizer(model_path):
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
+    except:
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, torch_dtype=torch.bfloat16)
+
+    patch_init(model, tokenizer)
+    return tokenizer, model
