@@ -61,11 +61,22 @@ def get_archive_file(
 
 def load_model_tokenizer(model_path):
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
-        model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, device_map="auto", torch_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, 
+            trust_remote_code=True, 
+            device_map="auto", 
+            torch_dtype=torch.bfloat16
+        ).to(device)
     except:
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, torch_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_config(
+            config, 
+            trust_remote_code=True, 
+            torch_dtype=torch.bfloat16
+        ).to(device)
 
     patch_init(model, tokenizer)
+    model.eval()
     return tokenizer, model

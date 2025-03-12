@@ -48,9 +48,6 @@ class LlamaVoiceForCausalLM(AvaterVoicePreTrainedModel, GenerationMixin):
 
     def get_encoder(self,):
         return self.llm
-    
-    def forward_llm(self,):
-        pass
 
     def forward(
         self,

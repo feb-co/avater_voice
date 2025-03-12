@@ -1,11 +1,23 @@
 import os
+import time
 import sys
 import torch
+import asyncio
 import soundfile as sf
 from audiotools import AudioSignal
 
 from transformers.cache_utils import DynamicCache
 
+
+os.environ["AVATER_LLM_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
+os.environ["AVATER_TEXT_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
+os.environ["AVATER_AUDIO_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/AvateAduio-tokenizer"
+os.environ["AVATER_TTS_PATH"] = "/mnt/ceph/licheng/chat_model/tts/llama3.1_tts_8b/tts_2502_synthesis_from_sft/checkpoint-20000/"
+os.environ["AVATER_WHISPER_PATH"] = "/mnt/ceph/huggingface/whisper-large-v3/"
+os.environ["AVATER_WAVLM_PATH"] = "/mnt/ceph/huggingface/wavlm-large/"
+
+
+from avater_infer.generation import AvaterForGeneration
 from avater_infer.models.patcher import patch_model
 from avater_infer.cache_utils import AvaterCache
 
@@ -26,7 +38,7 @@ Please repeat the following user's input (which may contain the two special symb
 
 """
     text_template = """{content}<|eot_id|>"""
-    
+
     # from datasets import DatasetDict, load_dataset, load_from_disk
     # tokenized_data = load_from_disk("/mnt/ceph/licheng/data-bin/train_data_tts_golden")
     # audio_codes = torch.LongTensor(tokenized_data["train"][0]["decoder_input_ids"])[:, 1:-1].to(tokenizer.device)
@@ -96,11 +108,21 @@ Please repeat the following user's input (which may contain the two special symb
     audio.write("/mnt/ceph/licheng/test.wav")
 
 
-def inference_voice_chat_t1a2(model, tokenizer, generation_config, chat):
-    formatted_chat = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(formatted_chat, return_tensors="pt", add_special_tokens=False)
-    outputs = model.generate(**inputs, voice_tokenizer=tokenizer, generation_config=generation_config)
+async def inference_voice_chat_t1a2(model, conversation):
+    avater_generator = AvaterForGeneration(model)
+    start_time = time.time()
+    llm_outputs, voice_outputs = await avater_generator.chat(conversation)
+    end_time = time.time()
 
+    llm_outputs = avater_generator.tokenizer.text_tokenizer.decode(llm_outputs[0])
+    print(end_time-start_time, llm_outputs)
+
+    voice_outputs = voice_outputs[:, 1:-1]
+    voice_outputs = avater_generator.tokenizer.decode(voice_outputs.view(1, voice_outputs.size(0), voice_outputs.size(-1)))
+
+    audio = AudioSignal(voice_outputs, sample_rate=24000)
+    audio.to("cpu")
+    audio.write("/mnt/ceph/licheng/test.wav")
 
 
 if __name__ == "__main__":
@@ -116,21 +138,25 @@ if __name__ == "__main__":
     #     "So I used it. I worked out of my two bedroom apartment when a pal from hps who I shared the apartment with moved out."
     #     # "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
     #     # "That's great. And, uh, thank you for talking with me."
-    #     # "Hi, I am Ray Dalio! fuck! who are you?"
     # )
 
 
     # Voice Chat T1A2 Task
-    os.environ["AVATER_LLM_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
-    os.environ["AVATER_TEXT_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
-    os.environ["AVATER_AUDIO_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/AvateAduio-tokenizer"
-    os.environ["AVATER_TTS_PATH"] = "/mnt/ceph/licheng/chat_model/tts/llama3.1_tts_8b/tts_2502_synthesis_from_sft/checkpoint-25000/"
-    os.environ["AVATER_WHISPER_PATH"] = "/mnt/ceph/huggingface/whisper-large-v3/"
-    os.environ["AVATER_WAVLM_PATH"] = "/mnt/ceph/huggingface/wavlm-large/"
-    inference_voice_chat_t1a2(
+    asyncio.run(inference_voice_chat_t1a2(
         model_name_and_path,
         [
-            {"role": "system", "content": "You are Ray Dalio"},
-            {"role": "user", "content": "hi"}
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": """Please repeat the following user's input (which may contain the two special symbols <|SHORT_WAIT|> and <|LONG_WAIT|>):
+
+```
+How can I assist you today?
+```"""}
         ]
-    )
+    ))
+    # asyncio.run(inference_voice_chat_t1a2(
+    #     model_name_and_path,
+    #     [
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": """hi"""}
+    #     ]
+    # ))

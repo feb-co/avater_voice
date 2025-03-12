@@ -9,11 +9,8 @@ from typing import Union, Any, Dict, List, Optional, Tuple
 
 from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer, EncodedInput, PaddingStrategy, TOKENIZER_CONFIG_FILE
 from transformers.utils import TensorType
-from transformers.cache_utils import DynamicCache
 from transformers.dynamic_module_utils import custom_object_save
 from transformers import AutoTokenizer, AutoFeatureExtractor
-
-from avater_infer.cache_utils import AvaterCache
 
 
 TEXT_TOKENIZER_PATH = os.getenv("AVATER_TEXT_TOKENIZER_PATH", None)
@@ -40,7 +37,7 @@ def get_1dconv_out_seq_lens(n_layers, in_seq_lens):
         return out
 
 
-def generate_chat_template(messages, custom_tools=None, builtin_tools=None, date_string="26 Jul 2024", add_generation_prompt=False):
+def generate_chat_template(messages, custom_tools=None, builtin_tools=None, add_generation_prompt=False):
     # Initialize variables
     tools_in_user_message = True
     tools = custom_tools if custom_tools is not None else None
@@ -60,8 +57,6 @@ def generate_chat_template(messages, custom_tools=None, builtin_tools=None, date
     if builtin_tools:
         tools_list = [tool for tool in builtin_tools if tool != 'code_interpreter']
         template += f"Tools: {', '.join(tools_list)}\n\n"
-    
-    template += f"Cutting Knowledge Date: December 2023\nToday Date: {date_string}\n\n"
     
     if tools is not None and not tools_in_user_message:
         template += (
@@ -132,9 +127,6 @@ def get_jinja_template():
 {%- if not tools_in_user_message is defined %}
     {%- set tools_in_user_message = true %}
 {%- endif %}
-{%- if not date_string is defined %}
-    {%- set date_string = "26 Jul 2024" %}
-{%- endif %}
 {%- if not tools is defined %}
     {%- set tools = none %}
 {%- endif %}
@@ -148,22 +140,20 @@ def get_jinja_template():
 {%- endif %}
 
 {#- System message + builtin tools #}
-{{- "<|start_header_id|>system<|end_header_id|>\\n\\n" }}
+{{- "<|start_header_id|>system<|end_header_id|>\n\n" }}
 {%- if builtin_tools is defined or tools is not none %}
-    {{- "Environment: ipython\\n" }}
+    {{- "Environment: ipython\n" }}
 {%- endif %}
 {%- if builtin_tools is defined %}
-    {{- "Tools: " + builtin_tools | reject('equalto', 'code_interpreter') | join(", ") + "\\n\\n"}}
+    {{- "Tools: " + builtin_tools | reject('equalto', 'code_interpreter') | join(", ") + "\n\n"}}
 {%- endif %}
-{{- "Cutting Knowledge Date: December 2023\\n" }}
-{{- "Today Date: " + date_string + "\\n\\n" }}
 {%- if tools is not none and not tools_in_user_message %}
     {{- "You have access to the following functions. To call a function, please respond with JSON for a function call." }}
     {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
-    {{- "Do not use variables.\\n\\n" }}
+    {{- "Do not use variables.\n\n" }}
     {%- for t in tools %}
         {{- t | tojson(indent=4) }}
-        {{- "\\n\\n" }}
+        {{- "\n\n" }}
     {%- endfor %}
 {%- endif %}
 {{- system_message }}
@@ -178,28 +168,28 @@ def get_jinja_template():
     {%- else %}
         {{- raise_exception("Cannot put tools in the first user message when there's no first user message!") }}
 {%- endif %}
-    {{- '<|start_header_id|>user<|end_header_id|>\\n\\n' -}}
+    {{- '<|start_header_id|>user<|end_header_id|>\n\n' -}}
     {{- "Given the following functions, please respond with a JSON for a function call " }}
-    {{- "with its proper arguments that best answers the given prompt.\\n\\n" }}
+    {{- "with its proper arguments that best answers the given prompt.\n\n" }}
     {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
-    {{- "Do not use variables.\\n\\n" }}
+    {{- "Do not use variables.\n\n" }}
     {%- for t in tools %}
         {{- t | tojson(indent=4) }}
-        {{- "\\n\\n" }}
+        {{- "\n\n" }}
     {%- endfor %}
     {{- first_user_message + "<|eot_id|>"}}
 {%- endif %}
 
 {%- for message in messages %}
     {%- if not (message.role == 'ipython' or message.role == 'tool' or 'tool_calls' in message) %}
-        {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'+ message['content'] | trim + '<|eot_id|>' }}
+        {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' }}
     {%- elif 'tool_calls' in message %}
         {%- if not message.tool_calls|length == 1 %}
             {{- raise_exception("This model only supports single tool-calls at once!") }}
         {%- endif %}
         {%- set tool_call = message.tool_calls[0].function %}
         {%- if builtin_tools is defined and tool_call.name in builtin_tools %}
-            {{- '<|start_header_id|>assistant<|end_header_id|>\\n\\n' -}}
+            {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
             {{- "<|python_tag|>" + tool_call.name + ".call(" }}
             {%- for arg_name, arg_val in tool_call.arguments | items %}
                 {{- arg_name + '="' + arg_val + '"' }}
@@ -209,7 +199,7 @@ def get_jinja_template():
                 {%- endfor %}
             {{- ")" }}
         {%- else  %}
-            {{- '<|start_header_id|>assistant<|end_header_id|>\\n\\n' -}}
+            {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
             {{- '{"name": "' + tool_call.name + '", ' }}
             {{- '"parameters": ' }}
             {{- tool_call.arguments | tojson }}
@@ -222,7 +212,7 @@ def get_jinja_template():
             {{- "<|eot_id|>" }}
         {%- endif %}
     {%- elif message.role == "tool" or message.role == "ipython" %}
-        {{- "<|start_header_id|>ipython<|end_header_id|>\\n\\n" }}
+        {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
         {%- if message.content is mapping or message.content is iterable %}
             {{- message.content | tojson }}
         {%- else %}
@@ -232,8 +222,9 @@ def get_jinja_template():
     {%- endif %}
 {%- endfor %}
 {%- if add_generation_prompt %}
-    {{- '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}
-{%- endif %}"""
+    {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}
+{%- endif %}
+"""
 
 
 class AvaterVoiceTokenizer(PreTrainedTokenizer):
@@ -309,35 +300,6 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             f" special_tokens={self.special_tokens_map}, clean_up_tokenization_spaces={self.text_tokenizer.clean_up_tokenization_spaces},"
             " added_tokens_decoder={\n\t" + added_tokens_decoder_rep + "\n}\n)"
         )
-
-    def __call__(
-        self,
-        formatted_chat: str=None,
-        add_special_tokens: bool= True,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-        **kwargs,
-    ) -> BatchEncoding:
-        batch_outputs = {}
-
-        # init llm input
-        input_ids = self.encode(formatted_chat, add_special_tokens=add_special_tokens)
-
-        # init tts adapter input
-        decoder_input_ids = [[self.audio_special_token["boa_token"]] for _ in range(self.code_layer)]
-
-        # init cache
-        past_key_values = AvaterCache(
-            DynamicCache(),
-            DynamicCache(),
-            DynamicCache(),
-        )
-
-        # merge output
-        batch_outputs["input_ids"] = [input_ids]
-        batch_outputs["decoder_input_ids"] = [decoder_input_ids]
-        batch_outputs["past_key_values"] = past_key_values
-        batch_outputs = BatchEncoding(batch_outputs, tensor_type=return_tensors)
-        return batch_outputs
 
     def _encode_whisper_feature(self, signal_array, type="tensor"):
         audio = whisper.pad_or_trim(signal_array)
@@ -692,8 +654,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             audio = self.audio_tokenizer.decode(audio_codes)
         return audio
 
-    def convert_t2a_attention_mask(self, text_tokens: list[int], audio_tokens: list, remove_assert=False):
-        audio_length = len(audio_tokens[0])
+    def convert_t2a_attention_mask(self, text_tokens: list[int], audio_length: int, remove_assert=False):
         text_length = len(text_tokens)
 
         attention_mask = torch.zeros([audio_length, text_length])
@@ -701,7 +662,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
         for audio_idx in range(audio_length):
             if audio_idx % self.audio_duration_token == 0:
                 text_token_threshold += self.text_duration_token
-            text_token_threshold = self.get_complete_phrase(text_tokens, text_token_threshold)
+            text_token_threshold = self._get_complete_phrase(text_tokens, text_token_threshold)
             attention_mask[audio_idx][:text_token_threshold] = 1
 
         if not remove_assert:
@@ -709,7 +670,14 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
 
         return attention_mask.tolist()
 
-    def get_complete_phrase(self, text_tokens: list[int], text_token_threshold: int):
+    def get_text_token_requirement(self, audio_length: int, offset=1):
+        text_token_threshold = 0
+        for audio_idx in range(audio_length):
+            if audio_idx % self.audio_duration_token == 0:
+                text_token_threshold += (self.text_duration_token+offset)
+        return text_token_threshold
+
+    def _get_complete_phrase(self, text_tokens: list[int], text_token_threshold: int):
         subwords = self.text_tokenizer.convert_ids_to_tokens(text_tokens)
         current_phrase = subwords[:text_token_threshold]
         new_text_token_threshold = text_token_threshold

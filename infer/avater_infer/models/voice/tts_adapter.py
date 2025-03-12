@@ -11,7 +11,6 @@ from transformers.utils import (
     is_flash_attn_greater_or_equal_2_10,
     logging,
 )
-from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_utils import PreTrainedModel
@@ -32,6 +31,7 @@ from transformers.models.bart.modeling_bart import (
 
 from ...modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions
 from .configuration_voice import AvaterVoiceConfig
+from ...cache_utils import AvaterCache
 
 
 logger = logging.get_logger(__name__)
@@ -158,7 +158,7 @@ class TTSAdapterAttention(nn.Module):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[AvaterCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -166,17 +166,12 @@ class TTSAdapterAttention(nn.Module):
         """Input shape: Batch x Time x Channel"""
         attn_idx = self.layer_idx + (self.block_idx * self.config.tts_adapter_hidden_layers)
         bsz, tgt_len, _ = hidden_states.size()
-        is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
-        if self.encoder_attn and not is_updated:
+        if self.encoder_attn:
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
-        elif self.encoder_attn:
-            # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx]
-            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
@@ -189,8 +184,7 @@ class TTSAdapterAttention(nn.Module):
 
         # Past Key Value
         if past_key_values is not None:
-            if self.encoder_attn and not is_updated:
-                past_key_values.is_updated[attn_idx] = True
+            if self.encoder_attn:
                 key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
                 key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, attn_idx, cache_kwargs)
@@ -245,7 +239,7 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[AvaterCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -253,17 +247,12 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         output_attentions = False
         attn_idx = self.layer_idx + (self.block_idx * self.config.tts_adapter_hidden_layers)
         bsz, tgt_len, _ = hidden_states.size()
-        is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
-        if self.encoder_attn and not is_updated:
+        if self.encoder_attn:
             key_states = self._shape(self.k_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(key_value_states), tgt_len, bsz, self.num_key_value_heads)
-        elif self.encoder_attn:
-            # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx]
-            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), tgt_len, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), tgt_len, bsz, self.num_key_value_heads)
@@ -276,8 +265,7 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
 
         # Past Key Value
         if past_key_values is not None:
-            if self.encoder_attn and not is_updated:
-                past_key_values.is_updated[attn_idx] = True
+            if self.encoder_attn:
                 key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
                 key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, attn_idx, cache_kwargs)
@@ -344,7 +332,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[AvaterCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -368,17 +356,12 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
 
         attn_idx = self.layer_idx + (self.block_idx * self.config.tts_adapter_hidden_layers)
         bsz, tgt_len, _ = hidden_states.size()
-        is_updated = past_key_values.is_updated.get(attn_idx) if past_key_values else False
 
         # Proj Q,K,V based on past_key_values
         query_states = self._shape(self.q_proj(hidden_states), tgt_len, bsz, self.num_heads)
-        if self.encoder_attn and not is_updated:
+        if self.encoder_attn:
             key_states = self._shape(self.k_proj(key_value_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(key_value_states), -1, bsz, self.num_key_value_heads)
-        elif self.encoder_attn:
-            # reuse k,v, cross_attentions
-            key_states = past_key_values.cross_attention_cache.key_cache[attn_idx]
-            value_states = past_key_values.cross_attention_cache.value_cache[attn_idx]
         else:
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz, self.num_key_value_heads)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz, self.num_key_value_heads)
@@ -391,8 +374,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
 
         # Past Key Value
         if past_key_values is not None:
-            if self.encoder_attn and not is_updated:
-                past_key_values.is_updated[attn_idx] = True
+            if self.encoder_attn:
                 key_states, value_states = past_key_values.cross_attention_cache.update(key_states, value_states, attn_idx, {})
             elif not self.encoder_attn:
                 key_states, value_states = past_key_values.self_attention_cache.update(key_states, value_states, attn_idx, cache_kwargs)
@@ -806,7 +788,7 @@ class TTSAdapter(AvaterTTSPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Union[AvaterCache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
