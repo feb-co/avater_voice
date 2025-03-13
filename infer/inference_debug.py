@@ -110,14 +110,10 @@ Please repeat the following user's input (which may contain the two special symb
 
 async def inference_voice_chat_t1a2(model, conversation):
     avater_generator = AvaterForGeneration(model)
-    start_time = time.time()
     llm_outputs, voice_outputs = await avater_generator.chat(conversation)
-    end_time = time.time()
-
+    
     llm_outputs = avater_generator.tokenizer.text_tokenizer.decode(llm_outputs[0])
-    print(end_time-start_time, llm_outputs)
-
-    voice_outputs = voice_outputs[:, 1:-1]
+    voice_outputs = voice_outputs[:, 1:-1].to(avater_generator.tokenizer.device)
     voice_outputs = avater_generator.tokenizer.decode(voice_outputs.view(1, voice_outputs.size(0), voice_outputs.size(-1)))
 
     audio = AudioSignal(voice_outputs, sample_rate=24000)
@@ -139,7 +135,6 @@ if __name__ == "__main__":
     #     # "The more you do this, the more you will be able to see things from a higher level and develop and refine great principles to help you make better decisions."
     #     # "That's great. And, uh, thank you for talking with me."
     # )
-
 
     # Voice Chat T1A2 Task
     asyncio.run(inference_voice_chat_t1a2(

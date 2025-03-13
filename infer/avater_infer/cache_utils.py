@@ -1,4 +1,6 @@
 import torch
+import time
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from transformers.cache_utils import Cache
@@ -11,6 +13,8 @@ class AvaterTokenCache(Cache):
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
         self.token_id_cache: torch.Tensor = None
         self.token_state_cache: List[torch.Tensor] = []
+        self.update_event = threading.Event()
+        self.last_update_time = time.time()
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         if layer_idx < len(self):
@@ -61,6 +65,9 @@ class AvaterTokenCache(Cache):
             else:
                 self.token_id_cache = token_ids
 
+            self.last_update_time = time.time()
+            self.update_event.set()
+            self.update_event.clear()
         return self.token_id_cache, self.token_state_cache[layer_idx]
 
     def endswith(self, token_id: int) -> bool:
@@ -73,6 +80,9 @@ class AvaterTokenCache(Cache):
         self._seen_tokens = 0
         self.token_id_cache: torch.Tensor = None
         self.token_state_cache: List[torch.Tensor] = []
+        self.last_update_time = time.time()
+        self.last_token_length = 0
+        self.token_growth_rate = 0
 
 
 class AvaterCache(Cache):

@@ -1,4 +1,4 @@
-# LLMGenerator class
+import time
 import torch
 from typing import List, Optional, Tuple, Union
 
@@ -44,6 +44,9 @@ class LLMGenerator(PreTrainedModel, GenerationMixin):
         self.tokenizer = tokenizer
         self.cache = cache
         self.generation_config = GenerationConfig.from_dict(llm_generation_config)
+        self.cuda_stream = torch.cuda.Stream()
+        
+        self.test_time = time.time()
 
     def _prepare_inputs(self, conversation):
         """
@@ -66,6 +69,22 @@ class LLMGenerator(PreTrainedModel, GenerationMixin):
         inputs["past_key_values"] = self.cache
 
         return inputs
+
+    def run(self, conversation):
+        with torch.cuda.stream(self.cuda_stream):
+            # All operations in this context will be queued in this stream
+            outputs = GenerationMixin.generate(
+                self, 
+                **self._prepare_inputs(conversation),
+                generation_config=self.generation_config
+            )
+
+            self.forward(
+                input_ids=outputs[:, -1:],
+                past_key_values=self.cache
+            )
+            self.test_time = time.time() - self.test_time
+            return outputs
 
     def forward(
         self,
@@ -112,12 +131,6 @@ class LLMGenerator(PreTrainedModel, GenerationMixin):
                 layer_idx=0,
                 token_states=encoder_outputs.hidden_states[-1][:, -1:],
                 token_ids=input_ids
-            )
-        else:
-            # For multi-token updates, only include states
-            past_key_values.avater_token_cache.update(
-                layer_idx=0,
-                token_states=encoder_outputs.hidden_states[-1][:, -1:],
             )
 
         # Update past_key_values in the output

@@ -1,4 +1,4 @@
-# VoiceGenerator class
+import time
 import torch
 from typing import List, Optional, Tuple, Union
 
@@ -44,9 +44,9 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
         self.tokenizer = tokenizer
         self.cache = cache
         self.generation_config = GenerationConfig.from_dict(voice_generation_config)
+        self.cuda_stream = torch.cuda.Stream()
 
-        # Set sleep time for polling (in microseconds)
-        self._polling_sleep_time = 10
+        self.test_time = time.time()
 
     def _prepare_inputs(self, conversation):
         """
@@ -70,6 +70,17 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
 
         return inputs
 
+    def run(self, conversation):
+        with torch.cuda.stream(self.cuda_stream):
+            # All operations in this context will be queued in this stream
+            outputs = GenerationMixin.generate(
+                self, 
+                **self._prepare_inputs(conversation),
+                generation_config=self.generation_config
+            )
+            self.test_time = time.time() - self.test_time
+            return outputs
+
     def continue_forward(self, input_ids: Optional[torch.LongTensor], past_key_values: Optional[AvaterCache]):
         """
         Determine if voice generation should wait for LLM generation
@@ -88,10 +99,12 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
         voice_tokens_length = past_key_values.self_attention_cache.get_seq_length(0) + input_ids.shape[1]
 
         # Wait if we need more LLM tokens and LLM hasn't finished generating
-        return (
+        if_wait = (
             self.tokenizer.get_text_token_requirement(voice_tokens_length) > llm_tokens_length and
             not past_key_values.avater_token_cache.endswith(self.tokenizer.text_tokenizer.eos_token_id)
         )
+
+        return if_wait
 
     def forward(
         self,
@@ -111,9 +124,12 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
         to generate voice tokens
         """
         # Wait for LLM generation to complete if necessary
+        start_wait = time.time()
         while self.continue_forward(input_ids, past_key_values):
-            torch.cuda.synchronize()
-            torch.cuda._sleep(self._polling_sleep_time)
+            past_key_values.avater_token_cache.update_event.wait(timeout=0.1)
+            if time.time() - start_wait > 1.0:
+                print(f"Warning: Timeout waiting for tokens after {time.time() - start_wait:.2f}s")
+                break
 
         # Get encoder states and prepare attention mask
         encoder_input_ids, encoder_hidden_state = past_key_values.avater_token_cache[0]
@@ -122,7 +138,7 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
         # Get only the new portion of encoder hidden states
         bsz, src_len = encoder_input_ids.size()
         tgt_len = past_key_values.self_attention_cache.get_seq_length(0) + input_ids.shape[1]
-        encoder_hidden_state = encoder_hidden_state[:, encoder_cache_length+1:]
+        encoder_hidden_state = encoder_hidden_state[:, encoder_cache_length:].to(self.model.device)
 
         # Convert text-to-audio attention mask for each item in batch
         encoder_decoder_attention_mask = torch.LongTensor([

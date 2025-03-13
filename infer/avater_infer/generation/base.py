@@ -1,10 +1,8 @@
-# AvaterForGeneration class
 import torch
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 from transformers.cache_utils import DynamicCache
-from transformers.generation import GenerationMixin
 
 from avater_infer.cache_utils import AvaterCache, AvaterTokenCache
 from avater_infer.modeling_utils import load_model_tokenizer
@@ -20,65 +18,85 @@ class AvaterForGeneration:
         # Initialize model and tokenizer
         self.tokenizer, self.model = load_model_tokenizer(model)
 
+        # Try to place models on separate devices if available
+        if torch.cuda.device_count() > 1:
+            try:
+                self.model.llm.to('cuda:0')
+                self.model.tts_adapter.to('cuda:1')
+                self.multi_gpu = True
+            except:
+                self.multi_gpu = False
+        else:
+            self.multi_gpu = False
+
         # Initialize shared cache
-        self.cache_values = AvaterCache(
+        self.cache = AvaterCache(
             llm_attention_cache=DynamicCache(),
             self_attention_cache=DynamicCache(),
             cross_attention_cache=DynamicCache(),
             avater_token_cache=AvaterTokenCache()
         )
 
-        # Pre-initialize generators to avoid creating them for each chat
-        self.llm_generator = LLMGenerator(self.model.llm, self.tokenizer, self.cache_values)
-        self.voice_generator = VoiceGenerator(self.model.tts_adapter, self.tokenizer, self.cache_values)
+        # Create generators
+        self.llm_generator = LLMGenerator(self.model.llm, self.tokenizer, self.cache)
+        self.voice_generator = VoiceGenerator(self.model.tts_adapter, self.tokenizer, self.cache)
 
-        # Create dedicated CUDA streams for parallel execution
-        self.llm_stream = torch.cuda.Stream()
-        self.voice_stream = torch.cuda.Stream()
-
-        # Create thread pool executor with fixed size
-        self.executor = ThreadPoolExecutor(max_workers=2)
+        # Generation options
+        self.progressive_generation = True
+        self.progressive_delay = 0.5
 
     async def chat(
         self,
         conversation,
     ):
-        # Define LLM generation task that runs in its own CUDA stream
-        def run_llm_task():
-            with torch.cuda.stream(self.llm_stream):
-                # All operations in this context will be queued in this stream
-                outputs = GenerationMixin.generate(
-                    self.llm_generator, 
-                    **self.llm_generator._prepare_inputs(conversation),
-                    generation_config=self.llm_generator.generation_config
-                )
+        if self.progressive_generation:
+            return await self.progressive_chat(conversation)
+        else:
+            return await self.parallel_chat(conversation)
 
-                # Update token cache after generation
-                self.cache_values.avater_token_cache.update(
-                    layer_idx=0,
-                    token_ids=self.llm_generator.generation_config.eos_token_id
-                )
-
-                return outputs
-
-        # Define voice generation task that runs in its own CUDA stream
-        def run_voice_task():
-            with torch.cuda.stream(self.voice_stream):
-                # All operations in this context will be queued in this stream
-                return GenerationMixin.generate(
-                    self.voice_generator, 
-                    **self.voice_generator._prepare_inputs(conversation),
-                    generation_config=self.voice_generator.generation_config
-                )
-
-        # Schedule both tasks to run concurrently using the thread pool
+    async def progressive_chat(self, conversation):
+        """Incremental generation mode that starts TTS after a short delay"""
+        executor = ThreadPoolExecutor(max_workers=2)
         loop = asyncio.get_running_loop()
-        llm_future = loop.run_in_executor(self.executor, run_llm_task)
-        voice_future = loop.run_in_executor(self.executor, run_voice_task)
+        
+        # Start LLM generation
+        llm_future = loop.run_in_executor(executor, self.llm_generator.run, conversation)
+        
+        # Wait briefly to let LLM generate initial tokens
+        await asyncio.sleep(self.progressive_delay)
+        
+        # Start voice generation
+        voice_future = loop.run_in_executor(executor, self.voice_generator.run, conversation)
+        
+        # Wait for both tasks to complete
+        llm_outputs, voice_outputs = await asyncio.gather(llm_future, voice_future)
+        
+        # Ensure all CUDA operations have completed
+        torch.cuda.synchronize()
+        
+        # Performance logging
+        print("LLM generator time:", self.llm_generator.test_time)
+        print("Voice generator time:", self.voice_generator.test_time)
+        
+        return llm_outputs, voice_outputs
+
+    async def parallel_chat(self, conversation):
+        """Original parallel generation mode"""
+        executor = ThreadPoolExecutor(max_workers=2)
+        loop = asyncio.get_running_loop()
+        
+        # Schedule both tasks to run concurrently using the thread pool
+        llm_future = loop.run_in_executor(executor, self.llm_generator.run, conversation)
+        voice_future = loop.run_in_executor(executor, self.voice_generator.run, conversation)
 
         # Wait for both tasks to complete
         llm_outputs, voice_outputs = await asyncio.gather(llm_future, voice_future)
 
         # Ensure all CUDA operations have completed
         torch.cuda.synchronize()
+        
+        # Performance logging
+        print("LLM generator time:", self.llm_generator.test_time)
+        print("Voice generator time:", self.voice_generator.test_time)
+        
         return llm_outputs, voice_outputs
