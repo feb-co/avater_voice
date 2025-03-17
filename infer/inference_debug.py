@@ -1,10 +1,11 @@
 import os
-import time
 import sys
 import torch
 import asyncio
 import soundfile as sf
-from audiotools import AudioSignal
+
+from vllm import EngineArgs
+from vllm.utils import FlexibleArgumentParser
 
 from transformers.cache_utils import DynamicCache
 
@@ -108,21 +109,37 @@ Please repeat the following user's input (which may contain the two special symb
     audio.write("/mnt/ceph/licheng/test.wav")
 
 
-async def inference_voice_chat_t1a2(model, conversation):
-    avater_generator = AvaterForGeneration(model)
+async def main(args):
+    avater_generator = AvaterForGeneration(args)
     llm_outputs, voice_outputs = await avater_generator.chat(conversation)
-    
+
     llm_outputs = avater_generator.tokenizer.text_tokenizer.decode(llm_outputs[0])
     voice_outputs = voice_outputs[:, 1:-1].to(avater_generator.tokenizer.device)
     voice_outputs = avater_generator.tokenizer.decode(voice_outputs.view(1, voice_outputs.size(0), voice_outputs.size(-1)))
 
-    audio = AudioSignal(voice_outputs, sample_rate=24000)
-    audio.to("cpu")
-    audio.write("/mnt/ceph/licheng/test.wav")
+    if isinstance(voice_outputs, torch.Tensor):
+        voice_outputs = voice_outputs.detach().cpu().numpy()
+
+    sf.write("/mnt/ceph/licheng/test.wav", voice_outputs, avater_generator.tokenizer.audio_tokenizer_sample_rate)
 
 
 if __name__ == "__main__":
-    model_name_and_path = sys.argv[1]
+    parser = FlexibleArgumentParser()
+
+    # Add engine args
+    engine_group = parser.add_argument_group("Engine arguments")
+    EngineArgs.add_cli_args(engine_group)
+ 
+    # Add sampling params
+    sampling_group = parser.add_argument_group("Sampling parameters")
+    sampling_group.add_argument("--max-tokens", type=int)
+    sampling_group.add_argument("--temperature", type=float)
+    sampling_group.add_argument("--top-p", type=float)
+    sampling_group.add_argument("--top-k", type=int)
+
+    # Add conversation params
+    parser.add_argument("--chat-conversation", type=list)
+    args = parser.parse_args()
 
     # TTS Task
     # os.environ["AVATER_LLM_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
@@ -137,17 +154,15 @@ if __name__ == "__main__":
     # )
 
     # Voice Chat T1A2 Task
-    asyncio.run(inference_voice_chat_t1a2(
-        model_name_and_path,
-        [
+    args.chat_conversation = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": """Please repeat the following user's input (which may contain the two special symbols <|SHORT_WAIT|> and <|LONG_WAIT|>):
 
 ```
 How can I assist you today?
 ```"""}
-        ]
-    ))
+    ]
+    asyncio.run(main(args))
     # asyncio.run(inference_voice_chat_t1a2(
     #     model_name_and_path,
     #     [

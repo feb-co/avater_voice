@@ -2,6 +2,8 @@ import torch
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+from vllm import LLM, SamplingParams
+
 from transformers.cache_utils import DynamicCache
 
 from avater_infer.cache_utils import AvaterCache, AvaterTokenCache
@@ -13,21 +15,24 @@ from .voice_generator import VoiceGenerator
 class AvaterForGeneration:
     def __init__(
         self,
-        model: str,
+        args
     ) -> None:
-        # Initialize model and tokenizer
-        self.tokenizer, self.model = load_model_tokenizer(model)
+        # Initialize VLLM model - this will be used for both LLM and TTS
+        self.vllm_model = LLM(
+            model=args.model, 
+            trust_remote_code=args.trust_remote_code,
+            tensor_parallel_size=getattr(args, 'tensor_parallel_size', 1),
+            dtype=getattr(args, 'dtype', 'float16'),
+            max_model_len=getattr(args, 'max_model_len', 8192),
+        )
+        import pdb; pdb.set_trace()
 
-        # Try to place models on separate devices if available
-        if torch.cuda.device_count() > 1:
-            try:
-                self.model.llm.to('cuda:0')
-                self.model.tts_adapter.to('cuda:1')
-                self.multi_gpu = True
-            except:
-                self.multi_gpu = False
-        else:
-            self.multi_gpu = False
+        # Get the tokenizer from VLLM model
+        self.tokenizer = self.vllm_model.get_tokenizer()
+
+        # VLLM handles its own device placement
+        # Set multi_gpu flag based on available GPU count
+        self.multi_gpu = torch.cuda.device_count() > 1
 
         # Initialize shared cache
         self.cache = AvaterCache(
@@ -37,9 +42,36 @@ class AvaterForGeneration:
             avater_token_cache=AvaterTokenCache()
         )
 
-        # Create generators
-        self.llm_generator = LLMGenerator(self.model.llm, self.tokenizer, self.cache)
-        self.voice_generator = VoiceGenerator(self.model.tts_adapter, self.tokenizer, self.cache)
+        # Create VLLM sampling parameters
+        self.sampling_params = SamplingParams(
+            temperature=getattr(args, 'temperature', 0.4),
+            top_p=getattr(args, 'top_p', 0.01),
+            max_tokens=getattr(args, 'max_tokens', 512),
+        )
+
+        # Create generators - both using VLLM
+        self.llm_generator = LLMGenerator(
+            model=None,  # We're fully using VLLM, no need for original model
+            tokenizer=self.tokenizer, 
+            cache=self.cache,
+            vllm_model=self.vllm_model,
+            sampling_params=self.sampling_params
+        )
+        
+        # Create TTS generator with VLLM
+        tts_sampling_params = SamplingParams(
+            temperature=getattr(args, 'tts_temperature', 0.1),
+            top_p=getattr(args, 'tts_top_p', 0.01),
+            max_tokens=getattr(args, 'tts_max_tokens', 512),
+        )
+        
+        self.voice_generator = VoiceGenerator(
+            model=None,  # No original model
+            tokenizer=self.tokenizer, 
+            cache=self.cache,
+            vllm_model=self.vllm_model,
+            sampling_params=tts_sampling_params
+        )
 
         # Generation options
         self.progressive_generation = True

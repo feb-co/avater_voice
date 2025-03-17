@@ -261,6 +261,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
         # text tokenizer init
         self.text_tokenizer = AutoTokenizer.from_pretrained(TEXT_TOKENIZER_PATH)
         self.bos_token = self.text_tokenizer.bos_token
+        self.total_vocab_size = len(self.get_vocab())
 
         # audio encoder init
         if audio_downsample_layer:
@@ -290,6 +291,41 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
                 self.audio_tokenizer_sample_rate = 24000
             else:
                 raise NotImplementedError
+
+    @property
+    def all_special_tokens_extended(self):
+        """
+        `List[Union[str, tokenizers.AddedToken]]`: All the special tokens (`'<unk>'`, `'<cls>'`, etc.), the order has
+        nothing to do with the index of each tokens. If you want to know the correct indices, check
+        `self.added_tokens_encoder`. We can't create an order anymore as the keys are `AddedTokens` and not `Strings`.
+
+        Don't convert tokens of `tokenizers.AddedToken` type to string so they can be used to control more finely how
+        special tokens are tokenized.
+        """
+        all_tokens = []
+        seen = set()
+        for value in self.text_tokenizer.special_tokens_map_extended.values():
+            if isinstance(value, (list, tuple)):
+                tokens_to_add = [token for token in value if str(token) not in seen]
+            else:
+                tokens_to_add = [value] if str(value) not in seen else []
+            seen.update(map(str, tokens_to_add))
+            all_tokens.extend(tokens_to_add)
+        return all_tokens
+
+    @property
+    def all_special_ids(self) -> List[int]:
+        """
+        `List[int]`: List the ids of the special tokens(`'<unk>'`, `'<cls>'`, etc.) mapped to class attributes.
+        """
+        all_toks = self.text_tokenizer.all_special_tokens
+        all_ids = self.text_tokenizer.convert_tokens_to_ids(all_toks)
+        return all_ids
+
+    @property
+    def vocab_size(self):
+        """Returns vocab size"""
+        return self.text_tokenizer.sp_model.get_piece_size()
 
     def __repr__(self) -> str:
         added_tokens_decoder_rep = "\n\t".join([f"{k}: {v.__repr__()}," for k, v in self.text_tokenizer.added_tokens_decoder.items()])
@@ -676,6 +712,12 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             if audio_idx % self.audio_duration_token == 0:
                 text_token_threshold += (self.text_duration_token+offset)
         return text_token_threshold
+
+    def get_vocab(self):
+        """Returns vocab as a dict"""
+        vocab = {self.text_tokenizer.convert_ids_to_tokens(i): i for i in range(self.text_tokenizer.vocab_size)}
+        vocab.update(self.text_tokenizer.added_tokens_encoder)
+        return vocab
 
     def _get_complete_phrase(self, text_tokens: list[int], text_token_threshold: int):
         subwords = self.text_tokenizer.convert_ids_to_tokens(text_tokens)
