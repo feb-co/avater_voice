@@ -46,9 +46,6 @@ class LlamaTTSForCausalLM(AvaterTTSPreTrainedModel, GenerationMixin):
     def __repr__(self):
         return self.tts_adapter.__repr__()
 
-    def get_encoder(self,):
-        return self.llm
-
     def forward(
         self,
         input_ids: torch.LongTensor = None,

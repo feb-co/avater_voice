@@ -114,7 +114,8 @@ class TTSAdapterAttention(nn.Module):
         self.block_idx = block_idx
         self.encoder_attn = encoder_attn
         self.is_causal = is_causal
-        
+        self.num_key_value_groups = 4
+
         if layer_idx is None:
             logger.warning_once(
                 f"Instantiating {self.__class__.__name__} without passing a `layer_idx` is not recommended and will "
@@ -126,7 +127,6 @@ class TTSAdapterAttention(nn.Module):
         self.attention_dropout = config.tts_adapter_attention_dropout
         self.num_heads = config.tts_adapter_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
-        self.num_key_value_groups = 4
         self.num_key_value_heads = self.num_heads // self.num_key_value_groups
         self.max_position_embeddings = config.max_position_embeddings
 
@@ -510,9 +510,9 @@ class TTSAdapterBlock(nn.Module):
 class TTSAdapterLayer(nn.Module):
     def __init__(self, config: AvaterVoiceConfig, layer_idx: int):
         super().__init__()
-        self.mlp_block = nn.ModuleList([])
+        self.block = nn.ModuleList([])
         for block_idx in range(config.block_size):
-            self.mlp_block.append(TTSAdapterBlock(config, block_idx, layer_idx))
+            self.block.append(TTSAdapterBlock(config, block_idx, layer_idx))
 
     def forward(
         self,
@@ -543,7 +543,7 @@ class TTSAdapterLayer(nn.Module):
                 Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
                 with `head_dim` being the embedding dimension of each attention head.
         """
-        hidden_states, self_attn_weights, cross_attn_weights, present_key_value = self.mlp_block[block_idx](
+        hidden_states, self_attn_weights, cross_attn_weights, present_key_value = self.block[block_idx](
             hidden_states,
             attention_mask,
             encoder_hidden_states,
