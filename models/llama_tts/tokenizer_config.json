@@ -1,27 +1,27 @@
 {
-  "name_or_path": "LlamaTTSTokenizer",
-  "auto_map": {
-    "AutoTokenizer": [
-      "tokenization_llama_tts.LlamaTTSTokenizer",
-      null
-      ]
-  },
-  "add_prefix_space": false,
-  "tokenizer_class": "LlamaTTSTokenizer",
-  "use_fast": false,
-  "short_wait_string": "<|SHORT_WAIT|>",
-  "long_wait_string": "<|LONG_WAIT|>",
-  "audio_tokenizer": "moshi_mimi",
-  "text_duration_token": 10,
-  "audio_special_token": {
-    "boa_token": 2048,
-    "eoa_token": 2049,
-    "short_wait_token": 2050,
-    "long_wait_token": 2051,
-    "<|reserved_special_token_0|>": 2052,
-    "<|reserved_special_token_1|>": 2053,
-    "<|reserved_special_token_2|>": 2054,
-    "<|reserved_special_token_3|>": 2055
-  },
-  "device": "cuda"
-}
+    "name_or_path": "LlamaTTSTokenizer",
+    "auto_map": {
+      "AutoTokenizer": [
+        "tokenization_llama_tts.LlamaTTSTokenizer",
+        null
+        ]
+    },
+    "add_prefix_space": false,
+    "tokenizer_class": "LlamaTTSTokenizer",
+    "use_fast": false,
+    "short_wait_string": "<|SHORT_WAIT|>",
+    "long_wait_string": "<|LONG_WAIT|>",
+    "audio_tokenizer": "moshi_mimi",
+    "text_duration_token": 3,
+    "audio_special_token": {
+      "boa_token": 2048,
+      "eoa_token": 2049,
+      "short_wait_token": 2050,
+      "long_wait_token": 2051,
+      "<|reserved_special_token_0|>": 2052,
+      "<|reserved_special_token_1|>": 2053,
+      "<|reserved_special_token_2|>": 2054,
+      "<|reserved_special_token_3|>": 2055
+    },
+    "device": "cuda"
+  }

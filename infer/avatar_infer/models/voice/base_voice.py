@@ -1,18 +1,18 @@
-"""PyTorch Avater Voice Base."""
+"""PyTorch Avatar Voice Base."""
 
 from torch import nn
 
 from transformers.utils import logging
 from transformers.modeling_utils import PreTrainedModel
 
-from .configuration_voice import AvaterVoiceConfig
+from .configuration_voice import AvatarVoiceConfig
 
 
 logger = logging.get_logger(__name__)
 
 
-class AvaterVoicePreTrainedModel(PreTrainedModel):
-    config_class = AvaterVoiceConfig
+class AvatarVoicePreTrainedModel(PreTrainedModel):
+    config_class = AvatarVoiceConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["LlamaDecoderLayer", "TTSAdapterLayer"]

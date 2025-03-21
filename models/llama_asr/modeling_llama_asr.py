@@ -9,8 +9,8 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
-from avater_infer.models.voice import ASREncoder, AvaterASRPreTrainedModel
-from avater_infer.cache_utils import AvaterCache
+from avatar_infer.models.voice import ASREncoder, AvatarASRPreTrainedModel
+from avatar_infer.cache_utils import AvatarCache
 
 from .configuration_llama_asr import LlamaASRConfig
 
@@ -18,7 +18,7 @@ from .configuration_llama_asr import LlamaASRConfig
 logger = logging.get_logger(__name__)
 
 
-class LlamaASRForCausalLM(AvaterASRPreTrainedModel, GenerationMixin):
+class LlamaASRForCausalLM(AvatarASRPreTrainedModel, GenerationMixin):
     config_class = LlamaASRConfig
 
     def __init__(self, config: LlamaASRConfig):
@@ -62,7 +62,7 @@ class LlamaASRForCausalLM(AvaterASRPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[AvaterCache] = None,
+        past_key_values: Optional[AvatarCache] = None,
         text_labels: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:

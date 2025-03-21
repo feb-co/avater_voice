@@ -7,7 +7,7 @@ from transformers.cache_utils import Cache
 from transformers.cache_utils import DynamicCache
 
 
-class AvaterTokenCache(Cache):
+class AvatarTokenCache(Cache):
     def __init__(self) -> None:
         super().__init__()
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
@@ -85,19 +85,19 @@ class AvaterTokenCache(Cache):
         self.token_growth_rate = 0
 
 
-class AvaterCache(Cache):
+class AvatarCache(Cache):
     def __init__(
         self,
         llm_attention_cache: DynamicCache,
         self_attention_cache: DynamicCache,
         cross_attention_cache: DynamicCache,
-        avater_token_cache: AvaterTokenCache
+        avatar_token_cache: AvatarTokenCache
     ) -> None:
         super().__init__()
         self.llm_attention_cache = llm_attention_cache
         self.self_attention_cache = self_attention_cache
         self.cross_attention_cache = cross_attention_cache
-        self.avater_token_cache = avater_token_cache
+        self.avatar_token_cache = avatar_token_cache
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         """

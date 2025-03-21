@@ -1,2 +1,2 @@
-# Avater Voice
-Empowering LLM-based Avater with speech and voice recognition capabilities
+# Avatar Voice
+Empowering LLM-based Avatar with speech and voice recognition capabilities

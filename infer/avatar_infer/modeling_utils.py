@@ -10,7 +10,7 @@ from transformers.modeling_utils import (
     WEIGHTS_INDEX_NAME,
 )
 
-from avater_infer.models.patcher import patch_init
+from avatar_infer.models.patcher import patch_init
 
 
 def get_archive_file(

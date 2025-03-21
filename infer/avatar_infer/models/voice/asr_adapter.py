@@ -1,4 +1,4 @@
-"""PyTorch Avater ASR adapter."""
+"""PyTorch Avatar ASR adapter."""
 
 from functools import partial
 from typing import List, Optional, Tuple, Union
@@ -19,7 +19,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoderLayer, Wh
 from transformers.models.wavlm.modeling_wavlm import WavLMModel, WavLMEncoderLayerStableLayerNorm
 from transformers.models.llama.modeling_llama import ACT2FN, LlamaRMSNorm
 
-from .configuration_voice import AvaterVoiceConfig
+from .configuration_voice import AvatarVoiceConfig
 
 
 logger = logging.get_logger(__name__)
@@ -85,7 +85,7 @@ class Conv1dSubsampler(nn.Module):
 
 
 class ASRAdapterMLP(nn.Module):
-    def __init__(self, config: AvaterVoiceConfig):
+    def __init__(self, config: AvatarVoiceConfig):
         super().__init__()
         self.config = config
         self.hidden_size = config.asr_adapter_hidden_size
@@ -119,7 +119,7 @@ class ASRAdapterMLP(nn.Module):
 
 
 class ASRAdapter(nn.Module):
-    def __init__(self, input_dim: int, config: AvaterVoiceConfig):
+    def __init__(self, input_dim: int, config: AvatarVoiceConfig):
         super().__init__()
         self.subsample = Conv1dSubsampler(input_dim, input_dim, config.asr_adapter_hidden_size, [3, 3])
         self.adapter = ASRAdapterMLP(config)
@@ -142,8 +142,8 @@ class ASRAdapter(nn.Module):
         return hidden_states
 
 
-class AvaterASRPreTrainedModel(PreTrainedModel):
-    config_class = AvaterVoiceConfig
+class AvatarASRPreTrainedModel(PreTrainedModel):
+    config_class = AvatarVoiceConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["LlamaDecoderLayer", "TTSAdapterLayer"]
@@ -166,8 +166,8 @@ class AvaterASRPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-class ASREncoder(AvaterASRPreTrainedModel):
-    def __init__(self, config: AvaterVoiceConfig):
+class ASREncoder(AvatarASRPreTrainedModel):
+    def __init__(self, config: AvatarVoiceConfig):
         super().__init__(config)
         self.config = config
 

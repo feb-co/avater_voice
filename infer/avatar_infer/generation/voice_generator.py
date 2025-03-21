@@ -8,9 +8,9 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.tokenization_utils import BatchEncoding
 from transformers import AutoModelForCausalLM, GenerationConfig
 
-from avater_infer.cache_utils import AvaterCache
-from avater_infer.models.voice.tokenization_voice import AvaterVoiceTokenizer
-from avater_infer.modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions
+from avatar_infer.cache_utils import AvatarCache
+from avatar_infer.models.voice.tokenization_voice import AvatarVoiceTokenizer
+from avatar_infer.modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions
 
 # Voice generation config parameters
 voice_generation_config = {
@@ -29,7 +29,7 @@ voice_generation_config = {
 class VoiceGenerator(PreTrainedModel, GenerationMixin):
     _supports_cache_class = True
 
-    def __init__(self, model: AutoModelForCausalLM, tokenizer: AvaterVoiceTokenizer, cache: AvaterCache) -> None:
+    def __init__(self, model: AutoModelForCausalLM, tokenizer: AvatarVoiceTokenizer, cache: AvatarCache) -> None:
         """
         Initialize Voice Generator with model, tokenizer and cache
         
@@ -81,7 +81,7 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
             self.test_time = time.time() - self.test_time
             return outputs
 
-    def continue_forward(self, input_ids: Optional[torch.LongTensor], past_key_values: Optional[AvaterCache]):
+    def continue_forward(self, input_ids: Optional[torch.LongTensor], past_key_values: Optional[AvatarCache]):
         """
         Determine if voice generation should wait for LLM generation
         
@@ -93,7 +93,7 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
             Boolean indicating whether to wait for more LLM tokens
         """
         # Get current LLM token count
-        llm_tokens_length = len(past_key_values.avater_token_cache)
+        llm_tokens_length = len(past_key_values.avatar_token_cache)
 
         # Get current voice token count
         voice_tokens_length = past_key_values.self_attention_cache.get_seq_length(0) + input_ids.shape[1]
@@ -101,7 +101,7 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
         # Wait if we need more LLM tokens and LLM hasn't finished generating
         if_wait = (
             self.tokenizer.get_text_token_requirement(voice_tokens_length) > llm_tokens_length and
-            not past_key_values.avater_token_cache.endswith(self.tokenizer.text_tokenizer.eos_token_id)
+            not past_key_values.avatar_token_cache.endswith(self.tokenizer.text_tokenizer.eos_token_id)
         )
 
         return if_wait
@@ -114,7 +114,7 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        past_key_values: Optional[AvaterCache] = None,
+        past_key_values: Optional[AvatarCache] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         """
@@ -126,13 +126,13 @@ class VoiceGenerator(PreTrainedModel, GenerationMixin):
         # Wait for LLM generation to complete if necessary
         start_wait = time.time()
         while self.continue_forward(input_ids, past_key_values):
-            past_key_values.avater_token_cache.update_event.wait(timeout=0.1)
+            past_key_values.avatar_token_cache.update_event.wait(timeout=0.1)
             if time.time() - start_wait > 1.0:
                 print(f"Warning: Timeout waiting for tokens after {time.time() - start_wait:.2f}s")
                 break
 
         # Get encoder states and prepare attention mask
-        encoder_input_ids, encoder_hidden_state = past_key_values.avater_token_cache[0]
+        encoder_input_ids, encoder_hidden_state = past_key_values.avatar_token_cache[0]
         encoder_cache_length = past_key_values.cross_attention_cache.get_seq_length(0)
 
         # Get only the new portion of encoder hidden states

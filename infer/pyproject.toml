@@ -3,9 +3,9 @@ requires = ["setuptools >= 61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "avater_infer"
+name = "avatar_infer"
 version = "0.0.1"
-description = "the inference server for avater"
+description = "the inference server for avatar"
 readme = "README.md"
 authors = [{name = "Licheng Wang", email = "licheng.wang@vropco.ao"}]
 requires-python = ">=3.10.14"
@@ -24,8 +24,8 @@ test = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["avater_infer*"]
+include = ["avatar_infer*"]
 exclude = ["tests*"] 
 
 [tool.setuptools.package-data]
-"avater_infer" = ["py.typed", "*.pyi", "**/*.pyi"]
+"avatar_infer" = ["py.typed", "*.pyi", "**/*.pyi"]

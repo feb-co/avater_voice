@@ -7,10 +7,7 @@ from torch import nn
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -42,18 +39,16 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
 )
 
 
-from avater_infer.models.voice.configuration_voice import AvaterVoiceConfig
+from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
 
 
 class TTSAdapterHead(nn.Module):
     def __init__(
         self,
-        config: AvaterVoiceConfig,
+        config: AvatarVoiceConfig,
         lora_config,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -90,7 +85,7 @@ class TTSAdapterHead(nn.Module):
 class TTSAdapterMLP(nn.Module):
     def __init__(
         self,
-        config: AvaterVoiceConfig,
+        config: AvatarVoiceConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -124,9 +119,8 @@ class TTSAdapterMLP(nn.Module):
 class TTSAdapterSelfAttention(nn.Module):
     def __init__(
         self,
-        config: AvaterVoiceConfig,
-        layer_idx: Optional[int] = None,
-        block_idx: Optional[int] = None,
+        config: AvatarVoiceConfig,
+        attn_idx: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         prefix: str = ""
@@ -135,8 +129,7 @@ class TTSAdapterSelfAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
 
         self.config = config
-        self.layer_idx = layer_idx
-        self.block_idx = block_idx
+        self.attn_idx = attn_idx
         self.num_key_value_groups = 4
 
         self.hidden_size = config.tts_adapter_hidden_size
@@ -197,19 +190,6 @@ class TTSAdapterSelfAttention(nn.Module):
             is_neox_style=is_neox_style,
         )
 
-        if hasattr(config, "interleaved_sliding_window"):
-            interleaved_sliding_window = config.interleaved_sliding_window
-            if isinstance(interleaved_sliding_window, int):
-                sliding_window = interleaved_sliding_window
-            elif isinstance(interleaved_sliding_window, list):
-                sw_idx = layer_idx % len(interleaved_sliding_window)
-                sliding_window = interleaved_sliding_window[sw_idx]
-            else:
-                raise ValueError(
-                    f"{type(interleaved_sliding_window)} is not supported.")
-        else:
-            sliding_window = None
-
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -217,7 +197,6 @@ class TTSAdapterSelfAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
-            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
 
@@ -229,9 +208,9 @@ class TTSAdapterSelfAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        q_state, k_state, v_state = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q_state, k_state = self.rotary_emb(positions, q_state, k_state)
+        attn_output = self.attn(q_state, k_state, v_state, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -239,9 +218,8 @@ class TTSAdapterSelfAttention(nn.Module):
 class TTSAdapterCrossAttention(nn.Module):
     def __init__(
         self,
-        config: AvaterVoiceConfig,
-        layer_idx: Optional[int] = None,
-        block_idx: Optional[int] = None,
+        config: AvatarVoiceConfig,
+        attn_idx: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -250,8 +228,7 @@ class TTSAdapterCrossAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
 
         self.config = config
-        self.layer_idx = layer_idx
-        self.block_idx = block_idx
+        self.attn_idx = attn_idx
         self.num_key_value_groups = 4
 
         self.hidden_size = config.tts_adapter_hidden_size
@@ -312,50 +289,51 @@ class TTSAdapterCrossAttention(nn.Module):
 
     def forward(
         self,
-        decoder_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Input shape: Batch x Time x Channel"""
+        q, _ = self.q_proj(hidden_states)
 
-        # (afeldman-nm 2024/07/22) TODO:
-        # Need a more efficient solution for q/k/v
-        qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
-        q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
-        if encoder_hidden_states is None:
-            k = None
-            v = None
+        if encoder_hidden_states is not None:
+            kv, _ = self.kv_proj(encoder_hidden_states)
+            k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
         else:
-            qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
-            _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
-                                    dim=-1)
+            k = v = None
 
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(
+            q,
+            k,
+            v,
+            kv_cache,
+            attn_metadata,
+        )
 
-        output, _ = self.out_proj(attn_output)
+        output, _ = self.o_proj(attn_output)
+
         return output
 
 
 class TTSAdapterBlock(nn.Module):
     def __init__(
         self,
-        config: AvaterVoiceConfig,
-        block_idx: int, layer_idx: int,
+        config: AvatarVoiceConfig,
+        block_idx: int,
+        attn_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = ""
     ):
         super().__init__()
         self.block_idx = block_idx
+        self.attn_idx = attn_idx
         self.dropout = config.tts_adapter_dropout
         self.embed_dim = config.tts_adapter_hidden_size
 
         self.self_attn = TTSAdapterSelfAttention(
             config=config,
-            layer_idx=layer_idx,
-            block_idx=block_idx,
+            attn_idx=attn_idx,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -365,8 +343,7 @@ class TTSAdapterBlock(nn.Module):
         if block_idx == 0:
             self.encoder_attn = TTSAdapterCrossAttention(
                 config=config,
-                layer_idx=layer_idx,
-                block_idx=block_idx,
+                attn_idx=attn_idx,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.encoder_attn",
@@ -376,30 +353,90 @@ class TTSAdapterBlock(nn.Module):
         self.mlp = TTSAdapterMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
         self.final_layer_norm = RMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ):
+        # Self Attention
+        residual = hidden_states
+        hidden_states = self.self_attn_layer_norm(hidden_states)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata
+        )
+        hidden_states = residual + hidden_states
+
+        # Cross-Attention Block
+        if self.block_idx == 0:
+            residual = hidden_states
+            hidden_states = self.encoder_attn_layer_norm(hidden_states)
+            hidden_states = self.encoder_attn(
+                hidden_states=hidden_states,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                encoder_hidden_states=encoder_hidden_states,
+            )
+            hidden_states = residual + hidden_states
+        
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.final_layer_norm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states
+
 
 class TTSAdapterLayer(nn.Module):
     def __init__(
         self,
-        config: AvaterVoiceConfig,
+        config: AvatarVoiceConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.mlp_block = nn.ModuleList([])
-        self.layer_idx=int(prefix.split(".")[-1])
+        self.block = nn.ModuleList([])
+        prefix_list = prefix.split(".")
+        self.layer_idx = int(prefix_list[-1])
         for block_idx in range(config.block_size):
-            self.mlp_block.append(TTSAdapterBlock(
+            attn_idx = self.layer_idx + (block_idx * config.tts_adapter_hidden_layers)
+            laryer_prefix = ".".join(prefix_list[:-1]+[str(attn_idx)])
+            self.block.append(TTSAdapterBlock(
                 config,
-                block_idx,
-                self.layer_idx,
+                block_idx=block_idx,
+                attn_idx=attn_idx,
                 quant_config=quant_config,
                 cache_config=cache_config,
-                prefix=f"{prefix}.mlp_block.{block_idx}"
+                prefix=laryer_prefix
             ))
 
+    def forward(
+        self,
+        block_idx: int,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ):
+        hidden_states = self.block[block_idx](
+            positions,
+            hidden_states,
+            encoder_hidden_states,
+            kv_cache,
+            attn_metadata
+        )
+        return hidden_states
 
-# @support_torch_compile
+
+@support_torch_compile
 class TTSAdapter(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -410,7 +447,7 @@ class TTSAdapter(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config: AvaterVoiceConfig = vllm_config.model_config.hf_config
+        config: AvatarVoiceConfig = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -419,48 +456,168 @@ class TTSAdapter(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
 
-        if get_pp_group().is_first_rank or (config.tie_word_embeddings
-                                            and get_pp_group().is_last_rank):
-            self.embed_tokens = VocabParallelEmbedding(
-                self.config.audio_vocab_size,
-                self.config.tts_adapter_hidden_size,
-                org_num_embeddings=self.config.audio_vocab_size,
-                quant_config=quant_config,
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
-
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            self.config.tts_adapter_hidden_layers,
-            lambda prefix: TTSAdapterLayer(config=config,
-                                      cache_config=cache_config,
-                                      quant_config=quant_config,
-                                      prefix=prefix),
-            prefix=f"{prefix}.layers",
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.audio_vocab_size,
+            self.config.tts_adapter_hidden_size,
+            org_num_embeddings=self.config.audio_vocab_size,
+            quant_config=quant_config,
         )
 
-        if get_pp_group().is_last_rank:
-            self.adapter_head = TTSAdapterHead(
+        self.layers = nn.ModuleList([
+            TTSAdapterLayer(
                 config,
-                lora_config,
+                cache_config,
                 quant_config,
-                prefix=f"{prefix}.adapter_head"
-            )
+                prefix=f"{prefix}.layers.{layer_idx}"
+            ) for layer_idx in range(self.config.tts_adapter_hidden_layers)
+        ])
 
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(
-                self.adapter_head.unpadded_vocab_size,
-                self.adapter_head.vocab_size,
-                logit_scale
-            )
-        else:
-            self.adapter_head = PPMissingLayer()
-        
-        if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
-        
+        self.adapter_head = TTSAdapterHead(
+            config,
+            lora_config,
+            quant_config,
+            prefix=f"{prefix}.adapter_head"
+        )
+
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(
+            self.adapter_head.unpadded_vocab_size,
+            self.adapter_head.vocab_size,
+            logit_scale
+        )
+
+        self.norm = nn.ModuleList([])
+        for _ in range(config.block_size):
+            self.norm.append(RMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps))
+
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.tts_adapter_hidden_size
         )
+
+    def forward_block(
+        self,
+        block_idx: int,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ):
+        for layer_idx, decoder_layer in enumerate(self.layers):
+            attn_idx = layer_idx + (block_idx * self.config.tts_adapter_hidden_layers)
+            hidden_states = decoder_layer(
+                block_idx,
+                positions,
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                kv_cache=kv_caches[attn_idx],
+                attn_metadata=attn_metadata
+            )
+
+        return hidden_states
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor],
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        pos_bias = (
+            torch.arange(0, self.config.code_layers, device=input_ids.device)
+            *
+            (self.config.code_size+self.config.audio_special_tokens)
+        ).view(1, self.config.code_layers)
+        inputs_embeds = self.embed_tokens(input_ids+pos_bias)
+        inputs_embeds = inputs_embeds.sum(dim=1)
+
+        logits_hidden_states = []
+        hidden_states = inputs_embeds
+        for block_idx in range(self.config.block_size):
+            residual = hidden_states
+
+            hidden_states = self.forward_block(
+                block_idx=block_idx,
+                positions=positions,
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata
+            )
+
+            # hidden_states for Logits
+            logits_hidden_states.append(hidden_states)
+
+            # residual
+            hidden_states = residual.to(hidden_states) + hidden_states
+        
+        logits_hidden_states = torch.cat(logits_hidden_states, dim=-1)
+        return logits_hidden_states
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            (".encoder_attn.kv_proj", ".encoder_attn.k_proj", "k"),
+            (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+            if "scale" in name:
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

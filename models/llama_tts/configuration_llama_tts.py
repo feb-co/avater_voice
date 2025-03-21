@@ -1,10 +1,10 @@
 """LLaMA TTS model configuration"""
 import os
 
-from avater_infer.models.voice import AvaterVoiceConfig
+from avatar_infer.models.voice import AvatarVoiceConfig
 
 
-class LlamaTTSConfig(AvaterVoiceConfig):
+class LlamaTTSConfig(AvatarVoiceConfig):
     model_type = "llama tts"
 
     def __init__(

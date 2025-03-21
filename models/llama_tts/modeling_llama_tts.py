@@ -9,9 +9,9 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
-from avater_infer.models.voice import TTSAdapter, AvaterTTSPreTrainedModel
-from avater_infer.cache_utils import AvaterCache
-from avater_infer.modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions, Seq2SeqCausalLMOutputWithCrossAttentions
+from avatar_infer.models.voice import TTSAdapter, AvatarTTSPreTrainedModel
+from avatar_infer.cache_utils import AvatarCache
+from avatar_infer.modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions, Seq2SeqCausalLMOutputWithCrossAttentions
 
 
 from .configuration_llama_tts import LlamaTTSConfig
@@ -20,7 +20,7 @@ from .configuration_llama_tts import LlamaTTSConfig
 logger = logging.get_logger(__name__)
 
 
-class LlamaTTSForCausalLM(AvaterTTSPreTrainedModel, GenerationMixin):
+class LlamaTTSForCausalLM(AvatarTTSPreTrainedModel, GenerationMixin):
     config_class = LlamaTTSConfig
 
     def __init__(self, config: LlamaTTSConfig):
@@ -63,7 +63,7 @@ class LlamaTTSForCausalLM(AvaterTTSPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[AvaterCache] = None,
+        past_key_values: Optional[AvatarCache] = None,
         **kwargs,
     ) -> Union[Tuple, Seq2SeqCausalLMOutputWithCrossAttentions]:
         r"""

@@ -1,10 +1,10 @@
 """LLaMA ASR model configuration"""
 import os
 
-from avater_infer.models.voice import AvaterVoiceConfig
+from avatar_infer.models.voice import AvatarVoiceConfig
 
 
-class LlamaVoiceConfig(AvaterVoiceConfig):
+class LlamaVoiceConfig(AvatarVoiceConfig):
     model_type = "llama voice"
 
     def __init__(

@@ -1,4 +1,4 @@
-"""Avater Voice model configuration"""
+"""Avatar Voice model configuration"""
 
 import os
 import json
@@ -14,8 +14,8 @@ TTS_PATH = os.getenv("AVATER_TTS_PATH", None)
 ASR_PATH = os.getenv("AVATER_ASR_PATH", None)
 
 
-class AvaterVoiceConfig(LlamaConfig):
-    model_type = "avater voice"
+class AvatarVoiceConfig(LlamaConfig):
+    model_type = "avatar voice"
 
     def __init__(
         self,

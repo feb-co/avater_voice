@@ -1,4 +1,4 @@
-"""PyTorch Avater TTS adapter."""
+"""PyTorch Avatar TTS adapter."""
 
 import math
 from typing import List, Optional, Tuple, Union
@@ -30,8 +30,8 @@ from transformers.models.bart.modeling_bart import (
 )
 
 from ...modeling_outputs import AdapterModelOutputWithPastAndCrossAttentions
-from .configuration_voice import AvaterVoiceConfig
-from ...cache_utils import AvaterCache
+from .configuration_voice import AvatarVoiceConfig
+from ...cache_utils import AvatarCache
 
 
 logger = logging.get_logger(__name__)
@@ -60,7 +60,7 @@ class AdapterAudioEmbedding(nn.Embedding):
 
 
 class AdapterHead(nn.Module):
-    def __init__(self, config: AvaterVoiceConfig):
+    def __init__(self, config: AvatarVoiceConfig):
         super().__init__()
         self.head_block = nn.ModuleList([])
         for _ in range(config.block_size):
@@ -71,7 +71,7 @@ class AdapterHead(nn.Module):
 
 
 class TTSAdapterMLP(nn.Module):
-    def __init__(self, config: AvaterVoiceConfig):
+    def __init__(self, config: AvatarVoiceConfig):
         super().__init__()
         self.config = config
         self.hidden_size = config.tts_adapter_hidden_size
@@ -107,7 +107,7 @@ class TTSAdapterMLP(nn.Module):
 class TTSAdapterAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: AvaterVoiceConfig, layer_idx: Optional[int] = None, block_idx: Optional[int] = None, encoder_attn=False, is_causal: bool = False):
+    def __init__(self, config: AvatarVoiceConfig, layer_idx: Optional[int] = None, block_idx: Optional[int] = None, encoder_attn=False, is_causal: bool = False):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -158,7 +158,7 @@ class TTSAdapterAttention(nn.Module):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        past_key_values: Optional[AvaterCache] = None,
+        past_key_values: Optional[AvatarCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -239,7 +239,7 @@ class TTSAdapterFlashAttention2(TTSAdapterAttention):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        past_key_values: Optional[AvaterCache] = None,
+        past_key_values: Optional[AvatarCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -332,7 +332,7 @@ class TTSAdapterSdpaAttention(TTSAdapterAttention):
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        past_key_values: Optional[AvaterCache] = None,
+        past_key_values: Optional[AvatarCache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -431,7 +431,7 @@ TTS_ADAPTER_ATTENTION_CLASSES = {
 
 
 class TTSAdapterBlock(nn.Module):
-    def __init__(self, config: AvaterVoiceConfig, block_idx: int, layer_idx: int):
+    def __init__(self, config: AvatarVoiceConfig, block_idx: int, layer_idx: int):
         super().__init__()
         self.block_idx = block_idx
         self.dropout = config.tts_adapter_dropout
@@ -503,12 +503,12 @@ class TTSAdapterBlock(nn.Module):
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        
+
         return hidden_states, self_attn_weights, cross_attn_weights, present_key_value
 
 
 class TTSAdapterLayer(nn.Module):
-    def __init__(self, config: AvaterVoiceConfig, layer_idx: int):
+    def __init__(self, config: AvatarVoiceConfig, layer_idx: int):
         super().__init__()
         self.block = nn.ModuleList([])
         for block_idx in range(config.block_size):
@@ -565,8 +565,8 @@ class TTSAdapterLayer(nn.Module):
         return outputs
 
 
-class AvaterTTSPreTrainedModel(PreTrainedModel):
-    config_class = AvaterVoiceConfig
+class AvatarTTSPreTrainedModel(PreTrainedModel):
+    config_class = AvatarVoiceConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["LlamaDecoderLayer", "TTSAdapterLayer"]
@@ -589,10 +589,10 @@ class AvaterTTSPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-class TTSAdapter(AvaterTTSPreTrainedModel):
+class TTSAdapter(AvatarTTSPreTrainedModel):
     _tied_weights_keys = ["embed_tokens.weight", "adapter_head.weight"]
 
-    def __init__(self, config: AvaterVoiceConfig):
+    def __init__(self, config: AvatarVoiceConfig):
         super().__init__(config)
         self.config = config
         self.dropout = config.tts_adapter_dropout
@@ -611,7 +611,9 @@ class TTSAdapter(AvaterTTSPreTrainedModel):
         # self.adapter_head = nn.Linear(config.tts_adapter_hidden_size, config.audio_vocab_size, bias=False)
         self.adapter_head = AdapterHead(config)
 
-        self.norm = LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
+        self.norm = nn.ModuleList([])
+        for _ in range(config.block_size):
+            self.norm.append(LlamaRMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps))
 
         rope_embedding_config = LlamaConfig(
             rope_theta=config.rope_theta,
@@ -774,7 +776,7 @@ class TTSAdapter(AvaterTTSPreTrainedModel):
                 if encoder_hidden_states is not None:
                     all_cross_attentions += (layer_outputs[2],)
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm[block_idx](hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -788,7 +790,7 @@ class TTSAdapter(AvaterTTSPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[AvaterCache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Union[AvatarCache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,

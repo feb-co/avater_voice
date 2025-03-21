@@ -1,10 +1,10 @@
 import os
 from typing import Any, Dict, Optional
 
-from avater_infer.models.voice import AvaterVoiceTokenizer
+from avatar_infer.models.voice import AvatarVoiceTokenizer
 
 
-class LlamaASRTokenizer(AvaterVoiceTokenizer):
+class LlamaASRTokenizer(AvatarVoiceTokenizer):
     def __init__(
         self,
         audio_downsample_layer=2,

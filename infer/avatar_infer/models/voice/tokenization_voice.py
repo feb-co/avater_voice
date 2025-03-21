@@ -227,7 +227,7 @@ def get_jinja_template():
 """
 
 
-class AvaterVoiceTokenizer(PreTrainedTokenizer):
+class AvatarVoiceTokenizer(PreTrainedTokenizer):
     def __init__(
         self,
         audio_special_token: Optional[Dict[str, Any]] = None,
@@ -405,7 +405,7 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
                 tokenizer_config[k] = getattr(self, k)
 
         tokenizer_config.update({
-            "name_or_path": "avater-tokenizer",
+            "name_or_path": "avatar-tokenizer",
             "add_prefix_space": False,
             "use_fast": False,
             "device": self.device,
@@ -690,16 +690,12 @@ class AvaterVoiceTokenizer(PreTrainedTokenizer):
             audio = self.audio_tokenizer.decode(audio_codes)
         return audio
 
-    def convert_t2a_attention_mask(self, text_tokens: list[int], audio_length: int, remove_assert=False):
-        text_length = len(text_tokens)
-
+    def convert_t2a_attention_mask(self, text_length: int, audio_length: int, remove_assert=False):
         attention_mask = torch.zeros([audio_length, text_length])
-        text_token_threshold = 0
+        text_token_threshold = self.text_duration_token
         for audio_idx in range(audio_length):
-            if audio_idx % self.audio_duration_token == 0:
-                text_token_threshold += self.text_duration_token
-            text_token_threshold = self._get_complete_phrase(text_tokens, text_token_threshold)
             attention_mask[audio_idx][:text_token_threshold] = 1
+            text_token_threshold += 1
 
         if not remove_assert:
             assert text_token_threshold >= text_length, "audio_tokens need cover text_tokens!"

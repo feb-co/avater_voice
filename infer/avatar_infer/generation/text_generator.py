@@ -8,8 +8,8 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.tokenization_utils import BatchEncoding
 from transformers import AutoModelForCausalLM, GenerationConfig
 
-from avater_infer.cache_utils import AvaterCache
-from avater_infer.models.voice.tokenization_voice import AvaterVoiceTokenizer
+from avatar_infer.cache_utils import AvatarCache
+from avatar_infer.models.voice.tokenization_voice import AvatarVoiceTokenizer
 
 
 # LLM generation config parameters
@@ -29,7 +29,7 @@ llm_generation_config = {
 class LLMGenerator(PreTrainedModel, GenerationMixin):
     _supports_cache_class = True
 
-    def __init__(self, model: AutoModelForCausalLM, tokenizer: AvaterVoiceTokenizer, cache: AvaterCache) -> None:
+    def __init__(self, model: AutoModelForCausalLM, tokenizer: AvatarVoiceTokenizer, cache: AvatarCache) -> None:
         """
         Initialize LLM Generator with model, tokenizer and cache
         
@@ -91,7 +91,7 @@ class LLMGenerator(PreTrainedModel, GenerationMixin):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[AvaterCache, List[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Union[AvatarCache, List[torch.FloatTensor]]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -127,7 +127,7 @@ class LLMGenerator(PreTrainedModel, GenerationMixin):
         # Update token cache based on input context
         if input_ids.size(1) == 1:
             # For single token updates, include token IDs
-            past_key_values.avater_token_cache.update(
+            past_key_values.avatar_token_cache.update(
                 layer_idx=0,
                 token_states=encoder_outputs.hidden_states[-1][:, -1:],
                 token_ids=input_ids

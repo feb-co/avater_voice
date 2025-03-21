@@ -1,10 +1,10 @@
 from typing import Any, Dict, Optional
 
-from avater_infer.models.voice import AvaterVoiceTokenizer
+from avatar_infer.models.voice import AvatarVoiceTokenizer
 
 
 
-class LlamaTTSTokenizer(AvaterVoiceTokenizer):
+class LlamaTTSTokenizer(AvatarVoiceTokenizer):
     def __init__(
         self,
         audio_special_token: Optional[Dict[str, Any]] = None,
