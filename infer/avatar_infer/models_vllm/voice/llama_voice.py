@@ -30,7 +30,7 @@ from avatar_infer.generation.sequence import VoiceSequenceData
 
 
 def dummy_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
-    avater_config: AvatarVoiceConfig = ctx.model_config.hf_config
+    avatar_config: AvatarVoiceConfig = ctx.model_config.hf_config
     # tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
     # mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
@@ -58,7 +58,7 @@ def dummy_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mappi
     #                                    item_size=image_feature_size)
     # }
 
-    seq_data = VoiceSequenceData.from_prompt_token_counts(avater_config.code_layers, (0, seq_len))
+    seq_data = VoiceSequenceData.from_prompt_token_counts(avatar_config.code_layers, (0, seq_len))
     return DummyData(seq_data)
 
 

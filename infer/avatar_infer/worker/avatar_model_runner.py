@@ -68,8 +68,8 @@ class AvatarModelInput(ModelInputForGPUWithSamplingMetadata):
         return cast(AvatarModelInput, super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
-class AvaterModelInputForGPUBuilder(ModelInputForGPUBuilder):
-    """Build AvaterModelInputForGPU from SequenceGroupMetadata."""
+class AvatarModelInputForGPUBuilder(ModelInputForGPUBuilder):
+    """Build AvatarModelInputForGPU from SequenceGroupMetadata."""
     def __init__(
         self,
         runner: "GPUModelRunnerBase",
@@ -119,7 +119,7 @@ class AvaterModelInputForGPUBuilder(ModelInputForGPUBuilder):
 
 
 class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
-    _builder_cls: Type[AvaterModelInputForGPUBuilder] = AvaterModelInputForGPUBuilder
+    _builder_cls: Type[AvatarModelInputForGPUBuilder] = AvatarModelInputForGPUBuilder
 
     def __init__(self, original_model_runner):
         # Store the original model runner
@@ -131,7 +131,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
                 setattr(self, attr_name, getattr(original_model_runner, attr_name))
 
         # add config for override
-        self.avater_config: AvatarVoiceConfig = original_model_runner.vllm_config.model_config.hf_config
+        self.avatar_config: AvatarVoiceConfig = original_model_runner.vllm_config.model_config.hf_config
         self._model_input_cls: Type[AvatarModelInput] = AvatarModelInput
         self.builder = self._builder_cls(weakref.proxy(self))
         self.tts_adapter_head_size = self.model_config.hf_config.tts_adapter_hidden_size//self.model_config.hf_config.tts_adapter_attention_heads
@@ -175,7 +175,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
         # Prepare input tensors
         max_batch_size = self.max_batchsize_to_capture
-        input_tokens = torch.zeros([max_batch_size, self.avater_config.code_layers], dtype=torch.long, device=self.device)
+        input_tokens = torch.zeros([max_batch_size, self.avatar_config.code_layers], dtype=torch.long, device=self.device)
         input_positions = torch.zeros(max_batch_size, dtype=torch.long, device=self.device)
         encoder_input_ids = torch.zeros(max_batch_size, dtype=torch.long, device=self.device)
         encoder_positions = torch.zeros(max_batch_size, dtype=torch.long, device=self.device)
@@ -473,7 +473,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         Returns:
             Tuple of (input_tokens, input_positions, attn_metadata)
         """
-        code_layers = self.avater_config.code_layers
+        code_layers = self.avatar_config.code_layers
 
         # Reshape input tokens to (batch_size * code_layers)
         input_tokens = model_input.input_tokens.view(-1, code_layers)
