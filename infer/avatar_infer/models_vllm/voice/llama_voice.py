@@ -10,10 +10,6 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData, InputCont
 from vllm.attention import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -96,7 +92,7 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         r"""
         Args:
             input_ids
@@ -116,20 +112,17 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
         Returns:
             Model output torch.Tensor
         """
-        encoder_hidden_states = None
-
-        if encoder_input_ids.numel() > 0:
-            # Run encoder attention if a non-zero number of encoder tokens are provided as input
-            encoder_hidden_states = self.llm(
-                input_ids=encoder_input_ids,
-                positions=encoder_positions,
-                kv_caches=kv_caches[:self.llm__hidden_layers],
-                attn_metadata=attn_metadata,
-                intermediate_tensors=intermediate_tensors
-            )
+        # Run encoder attention if a non-zero number of encoder tokens are provided as input
+        encoder_hidden_states = self.llm(
+            input_ids=encoder_input_ids,
+            positions=encoder_positions,
+            kv_caches=kv_caches[:self.llm__hidden_layers],
+            attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors
+        )
 
         # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
-        decoder_outputs = self.tts_adapter(
+        decoder_hidden_states = self.tts_adapter(
             input_ids=input_ids,
             positions=positions,
             encoder_hidden_states=encoder_hidden_states,
@@ -137,7 +130,10 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
             attn_metadata=attn_metadata
         )
 
-        return (encoder_hidden_states, decoder_outputs)
+        return IntermediateTensors({
+            "encoder_hidden_states": encoder_hidden_states,
+            "decoder_hidden_states": decoder_hidden_states
+        })
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loaded_params: Set[str] = set()

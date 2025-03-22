@@ -37,4 +37,3 @@ class AvatarLLM(LLM):
             dtype=dtype,
             **kwargs
         )
-        import pdb; pdb.set_trace()

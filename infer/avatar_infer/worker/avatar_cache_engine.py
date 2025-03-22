@@ -64,7 +64,7 @@ def bind_kv_cache(
 
             for ve, ve_kv_cache in enumerate(kv_cache):
                 forward_ctx.kv_cache[ve] = ve_kv_cache[used_kv_cache_idx:][kv_cache_idx]
-        
+
         used_kv_cache_idx += len(layer_index_sorted)
 
 
@@ -246,7 +246,7 @@ class AvatarCacheEngine:
             tts_alloc_shape = (*tts_kv_cache_shape[:2], tts_alloc_entry_size)
         else:
             tts_alloc_shape = tts_kv_cache_shape
-            
+
         for _ in range(self.tts_adapter_num_attention_layers):
             layer_kv_cache = torch.zeros(
                 tts_alloc_shape,
@@ -257,23 +257,81 @@ class AvatarCacheEngine:
             
             if self.align_cache:
                 layer_kv_cache = layer_kv_cache[..., :tts_entry_size]
-                
+
             kv_cache.append(layer_kv_cache.view(tts_kv_cache_shape))
-            
+
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
-        for i in range(self.num_attention_layers):
-            self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
-                                          src_to_dst)
+        """Swap blocks from CPU to GPU."""
+        # Extract the block indices relevant to each model
+        # You'll need to adapt this based on how you track which blocks belong to which model
+        llm_indices = src_to_dst[src_to_dst[:, 0] < self.llm_num_gpu_blocks]
+        tts_indices = src_to_dst[src_to_dst[:, 0] >= self.llm_num_gpu_blocks]
+
+        # Adjust TTS indices to account for offset
+        if tts_indices.shape[0] > 0:
+            tts_indices[:, 0] -= self.llm_num_gpu_blocks
+            tts_indices[:, 1] -= self.llm_num_cpu_blocks
+
+        # Perform swaps for each model
+        for i in range(self.llm_num_attention_layers):
+            if llm_indices.shape[0] > 0:
+                self.llm_attn_backend.swap_blocks(
+                    self.llm_cpu_cache[i], 
+                    self.llm_gpu_cache[i],
+                    llm_indices
+                )
+
+        for i in range(self.tts_adapter_num_attention_layers):
+            if tts_indices.shape[0] > 0:
+                self.tts_adapter_attn_backend.swap_blocks(
+                    self.tts_cpu_cache[i], 
+                    self.tts_gpu_cache[i],
+                    tts_indices
+                )
 
     def swap_out(self, src_to_dst: torch.Tensor) -> None:
-        for i in range(self.num_attention_layers):
-            self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
-                                          src_to_dst)
+        """Swap blocks from GPU to CPU."""
+        # Similar logic to swap_in but in reverse direction
+        llm_indices = src_to_dst[src_to_dst[:, 0] < self.llm_num_gpu_blocks]
+        tts_indices = src_to_dst[src_to_dst[:, 0] >= self.llm_num_gpu_blocks]
+
+        if tts_indices.shape[0] > 0:
+            tts_indices[:, 0] -= self.llm_num_gpu_blocks
+            tts_indices[:, 1] -= self.llm_num_cpu_blocks
+
+        for i in range(self.llm_num_attention_layers):
+            if llm_indices.shape[0] > 0:
+                self.llm_attn_backend.swap_blocks(
+                    self.llm_gpu_cache[i], 
+                    self.llm_cpu_cache[i],
+                    llm_indices
+                )
+
+        for i in range(self.tts_adapter_num_attention_layers):
+            if tts_indices.shape[0] > 0:
+                self.tts_adapter_attn_backend.swap_blocks(
+                    self.tts_gpu_cache[i], 
+                    self.tts_cpu_cache[i],
+                    tts_indices
+                )
 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
-        self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
+        """Copy blocks within GPU cache."""
+        # Split copy operations by model
+        llm_indices = src_to_dsts[src_to_dsts[:, 0] < self.llm_num_gpu_blocks]
+        tts_indices = src_to_dsts[src_to_dsts[:, 0] >= self.llm_num_gpu_blocks]
+
+        if tts_indices.shape[0] > 0:
+            tts_indices[:, 0] -= self.llm_num_gpu_blocks
+            tts_indices[:, 1] -= self.llm_num_gpu_blocks
+
+        if llm_indices.shape[0] > 0:
+            self.llm_attn_backend.copy_blocks(self.llm_gpu_cache, llm_indices)
+
+        if tts_indices.shape[0] > 0:
+            self.tts_adapter_attn_backend.copy_blocks(self.tts_gpu_cache, tts_indices)
 
     @staticmethod
     def _align_cache(model_config: ModelConfig):
@@ -289,26 +347,37 @@ class AvatarCacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
-        head_size = model_config.get_head_size()
-        num_heads = model_config.get_num_kv_heads(parallel_config)
-        num_attention_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
-
+        """Calculate the combined cache block size for both LLM and TTS adapter."""
+        # Need to account for both model components
+        llm_head_size = model_config.hf_config.hidden_size // model_config.hf_config.num_attention_heads
+        llm_num_kv_heads = model_config.hf_config.num_key_value_heads
+        llm_num_layers = model_config.hf_config.num_hidden_layers
+        
+        tts_head_size = model_config.hf_config.tts_adapter_hidden_size // model_config.hf_config.tts_adapter_attention_heads
+        tts_num_kv_heads = model_config.hf_config.tts_adapter_attention_heads // 4
+        tts_num_layers = model_config.hf_config.tts_adapter_hidden_layers * model_config.hf_config.code_layers
+        
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-
-        key_cache_entry = num_heads * head_size
+        
+        # Calculate LLM cache size
+        llm_key_cache_entry = llm_num_kv_heads * llm_head_size
         if AvatarCacheEngine._align_cache(model_config):
-            key_cache_entry = align_to_256bytes(key_cache_entry,
-                                                model_config.dtype)
-
-        # For MLA there is no value cache, since the latent vector
-        # is joint keys and values.
-        value_cache_entry = key_cache_entry if not model_config.use_mla else 0
-        total = num_attention_layers * cache_config.block_size * \
-            (key_cache_entry + value_cache_entry)
-
+            llm_key_cache_entry = align_to_256bytes(llm_key_cache_entry, model_config.dtype)
+            
+        llm_value_cache_entry = llm_key_cache_entry if not model_config.use_mla else 0
+        llm_total = llm_num_layers * cache_config.block_size * (llm_key_cache_entry + llm_value_cache_entry)
+        
+        # Calculate TTS adapter cache size
+        tts_key_cache_entry = tts_num_kv_heads * tts_head_size
+        if AvatarCacheEngine._align_cache(model_config):
+            tts_key_cache_entry = align_to_256bytes(tts_key_cache_entry, model_config.dtype)
+            
+        tts_value_cache_entry = tts_key_cache_entry if not model_config.use_mla else 0
+        tts_total = tts_num_layers * cache_config.block_size * (tts_key_cache_entry + tts_value_cache_entry)
+        
+        # Combined size
         dtype_size = get_dtype_size(dtype)
-        return dtype_size * total
+        return dtype_size * (llm_total + tts_total)

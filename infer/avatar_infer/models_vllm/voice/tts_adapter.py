@@ -284,7 +284,6 @@ class TTSAdapterCrossAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            attn_type=AttentionType.ENCODER_DECODER
         )
 
     def forward(

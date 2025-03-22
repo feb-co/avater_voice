@@ -7,6 +7,5 @@
       "AutoModel": "modeling_llama_voice.LlamaVoiceForCausalLM",
       "AutoModelForCausalLM": "modeling_llama_voice.LlamaVoiceForCausalLM"
     },
-    "is_encoder_decoder": true,
     "torch_dtype": "bfloat16"
 }

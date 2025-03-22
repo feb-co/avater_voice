@@ -691,7 +691,7 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
         return audio
 
     def convert_t2a_attention_mask(self, text_length: int, audio_length: int, remove_assert=False):
-        attention_mask = torch.zeros([audio_length, text_length])
+        attention_mask = torch.zeros([audio_length, text_length], device=self.device)
         text_token_threshold = self.text_duration_token
         for audio_idx in range(audio_length):
             attention_mask[audio_idx][:text_token_threshold] = 1
