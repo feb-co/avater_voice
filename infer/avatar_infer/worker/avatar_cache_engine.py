@@ -11,7 +11,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    LayerBlockType,
     align_to_256bytes,
     get_dtype_size,
     is_pin_memory_available
@@ -68,6 +67,25 @@ def bind_kv_cache(
         used_kv_cache_idx += len(layer_index_sorted)
 
 
+def get_avatar_param(model_config: ModelConfig):
+    llm_head_size = model_config.hf_config.hidden_size // model_config.hf_config.num_attention_heads
+    llm_num_attention_layers = model_config.hf_config.num_hidden_layers
+    llm_num_kv_heads = model_config.hf_config.num_key_value_heads
+
+    tts_adapter_head_size = model_config.hf_config.tts_adapter_hidden_size // model_config.hf_config.tts_adapter_attention_heads
+    tts_adapter_num_attention_layers = (
+        model_config.hf_config.tts_adapter_hidden_layers
+        *
+        model_config.hf_config.block_size
+    ) + model_config.hf_config.tts_adapter_hidden_layers
+    tts_adapter_num_kv_heads = model_config.hf_config.tts_adapter_attention_heads//4
+    
+    return (
+        llm_head_size, llm_num_attention_layers, llm_num_kv_heads,
+        tts_adapter_head_size, tts_adapter_num_attention_layers, tts_adapter_num_kv_heads
+    )
+
+
 class AvatarCacheEngine:
     """Manages the KV cache.
 
@@ -88,17 +106,10 @@ class AvatarCacheEngine:
         self.parallel_config = parallel_config
         self.device_config = device_config
 
-        self.llm_head_size = model_config.hf_config.hidden_size//model_config.hf_config.num_attention_heads
-        self.llm_num_attention_layers = model_config.hf_config.num_hidden_layers
-        self.llm_num_kv_heads = model_config.hf_config.num_key_value_heads
-
-        self.tts_adapter_head_size = model_config.hf_config.tts_adapter_hidden_size//model_config.hf_config.tts_adapter_attention_heads
-        self.tts_adapter_num_attention_layers = (
-            model_config.hf_config.tts_adapter_hidden_layers
-            *
-            model_config.hf_config.code_layers
-        )
-        self.tts_adapter_num_kv_heads = model_config.hf_config.tts_adapter_attention_heads//4
+        (
+            self.llm_head_size, self.llm_num_attention_layers, self.llm_num_kv_heads,
+            self.tts_adapter_head_size, self.tts_adapter_num_attention_layers, self.tts_adapter_num_kv_heads
+        ) = get_avatar_param(model_config)
 
         self.align_cache = self._align_cache(model_config)
 
@@ -186,15 +197,15 @@ class AvatarCacheEngine:
         key_cache_entry = num_kv_heads * head_size
         if self._align_cache(model_config):
             key_cache_entry = align_to_256bytes(key_cache_entry, model_config.dtype)
-            
+
         value_cache_entry = key_cache_entry if not model_config.use_mla else 0
         total = num_layers * self.block_size * (key_cache_entry + value_cache_entry)
-        
+
         if self.cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
-            
+
         dtype_size = get_dtype_size(dtype)
         return dtype_size * total
 
@@ -214,7 +225,7 @@ class AvatarCacheEngine:
             llm_alloc_shape = (*llm_kv_cache_shape[:2], llm_alloc_entry_size)
         else:
             llm_alloc_shape = llm_kv_cache_shape
-            
+
         for _ in range(self.llm_num_attention_layers):
             layer_kv_cache = torch.zeros(
                 llm_alloc_shape,
@@ -254,7 +265,7 @@ class AvatarCacheEngine:
                 pin_memory=pin_memory,
                 device=device
             )
-            
+
             if self.align_cache:
                 layer_kv_cache = layer_kv_cache[..., :tts_entry_size]
 
@@ -349,35 +360,32 @@ class AvatarCacheEngine:
     ) -> int:
         """Calculate the combined cache block size for both LLM and TTS adapter."""
         # Need to account for both model components
-        llm_head_size = model_config.hf_config.hidden_size // model_config.hf_config.num_attention_heads
-        llm_num_kv_heads = model_config.hf_config.num_key_value_heads
-        llm_num_layers = model_config.hf_config.num_hidden_layers
-        
-        tts_head_size = model_config.hf_config.tts_adapter_hidden_size // model_config.hf_config.tts_adapter_attention_heads
-        tts_num_kv_heads = model_config.hf_config.tts_adapter_attention_heads // 4
-        tts_num_layers = model_config.hf_config.tts_adapter_hidden_layers * model_config.hf_config.code_layers
-        
+        (
+            llm_head_size, llm_num_layers, llm_num_kv_heads,
+            tts_head_size, tts_num_layers, tts_num_kv_heads
+        ) = get_avatar_param(model_config)
+
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-        
+
         # Calculate LLM cache size
         llm_key_cache_entry = llm_num_kv_heads * llm_head_size
         if AvatarCacheEngine._align_cache(model_config):
             llm_key_cache_entry = align_to_256bytes(llm_key_cache_entry, model_config.dtype)
-            
+
         llm_value_cache_entry = llm_key_cache_entry if not model_config.use_mla else 0
         llm_total = llm_num_layers * cache_config.block_size * (llm_key_cache_entry + llm_value_cache_entry)
-        
+
         # Calculate TTS adapter cache size
         tts_key_cache_entry = tts_num_kv_heads * tts_head_size
         if AvatarCacheEngine._align_cache(model_config):
             tts_key_cache_entry = align_to_256bytes(tts_key_cache_entry, model_config.dtype)
-            
+
         tts_value_cache_entry = tts_key_cache_entry if not model_config.use_mla else 0
         tts_total = tts_num_layers * cache_config.block_size * (tts_key_cache_entry + tts_value_cache_entry)
-        
+
         # Combined size
         dtype_size = get_dtype_size(dtype)
         return dtype_size * (llm_total + tts_total)

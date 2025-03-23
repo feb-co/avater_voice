@@ -33,6 +33,7 @@ from vllm.worker.model_runner_base import (_add_attn_metadata_broadcastable_dict
 from vllm.utils import GiB_bytes
 
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
+from .avatar_cache_engine import get_avatar_param
 
 
 logger = init_logger(__name__)
@@ -333,64 +334,6 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
         return [output]
 
-    def make_model_input_from_broadcasted_tensor_dict(self, tensor_dict: Dict[str, Any]) -> AvatarModelInput:
-        return AvatarModelInput.from_broadcasted_tensor_dict(
-            tensor_dict,
-            attn_backend=self.attn_backend,
-        )
-
-    def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
-    ) -> AvatarModelInput:
-        """
-        Prepare the model input based on a given sequence group, including metadata for the sampling step.
-
-        Since chunked prefill is not supported for encoder/decoder models, `input_tokens` is assumed to be either entirely 
-        prefill tokens or entirely decode tokens.
-        """
-        model_input = self._prepare_model_input_tensors(seq_group_metadata_list, finished_requests_ids)
-        input_tokens, input_positions, attn_metadata = self._prepare_voice_input_tensors(model_input)
-        model_input = dataclasses.replace(
-            model_input,
-            input_tokens=input_tokens,
-            input_positions=input_positions,
-            attn_metadata=attn_metadata,
-        )
-
-        encoder_input_tokens_tensor, encoder_input_positions_tensor = (
-            self._prepare_encoder_model_input_tensors(seq_group_metadata_list, model_input)
-        )
-
-        # Inject attn_metadata encoder/cross-attention fields & encoder input tokens/positions into model_input.
-        # Frozen dataclass fields cannot be modified, so use dataclasses.replace to construct a new model input instance.
-        model_input = dataclasses.replace(
-            model_input,
-            encoder_input_tokens=encoder_input_tokens_tensor,
-            encoder_input_positions=encoder_input_positions_tensor,
-        )
-
-        generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list,
-            model_input.seq_lens,
-            model_input.query_lens,
-            self.device,
-            self.pin_memory,
-            generators=generators
-        )
-
-        is_prompt = seq_group_metadata_list[0].is_prompt if seq_group_metadata_list else None
-
-        return dataclasses.replace(
-            model_input,
-            sampling_metadata=sampling_metadata,
-            is_prompt=is_prompt,
-            virtual_engine=virtual_engine
-        )
-
     @torch.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
@@ -448,11 +391,11 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
             seqs.append(seq)
 
         # Run the model with the dummy inputs.
-        num_layers = self.model_config.hf_config.num_hidden_layers + (
-            self.model_config.hf_config.tts_adapter_hidden_layers
-            *
-            self.model_config.hf_config.code_layers
-        )
+        (
+            llm_head_size, llm_num_layers, llm_num_kv_heads,
+            tts_head_size, tts_num_layers, tts_num_kv_heads
+        ) = get_avatar_param(self.model_config)
+        num_layers = llm_num_layers + tts_num_layers
 
         # use an empty tensor instead of `None`` to force Dynamo to pass it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as a placeholder (it has wide hardware support).
@@ -463,6 +406,64 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
         return
+
+    def make_model_input_from_broadcasted_tensor_dict(self, tensor_dict: Dict[str, Any]) -> AvatarModelInput:
+        return AvatarModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
+
+    def prepare_model_input(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None
+    ) -> AvatarModelInput:
+        """
+        Prepare the model input based on a given sequence group, including metadata for the sampling step.
+
+        Since chunked prefill is not supported for encoder/decoder models, `input_tokens` is assumed to be either entirely 
+        prefill tokens or entirely decode tokens.
+        """
+        model_input = self._prepare_model_input_tensors(seq_group_metadata_list, finished_requests_ids)
+        input_tokens, input_positions, attn_metadata = self._prepare_voice_input_tensors(model_input)
+        model_input = dataclasses.replace(
+            model_input,
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+        )
+
+        encoder_input_tokens_tensor, encoder_input_positions_tensor = (
+            self._prepare_encoder_model_input_tensors(seq_group_metadata_list, model_input)
+        )
+
+        # Inject attn_metadata encoder/cross-attention fields & encoder input tokens/positions into model_input.
+        # Frozen dataclass fields cannot be modified, so use dataclasses.replace to construct a new model input instance.
+        model_input = dataclasses.replace(
+            model_input,
+            encoder_input_tokens=encoder_input_tokens_tensor,
+            encoder_input_positions=encoder_input_positions_tensor,
+        )
+
+        generators = self.get_generators(finished_requests_ids)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            model_input.seq_lens,
+            model_input.query_lens,
+            self.device,
+            self.pin_memory,
+            generators=generators
+        )
+
+        is_prompt = seq_group_metadata_list[0].is_prompt if seq_group_metadata_list else None
+
+        return dataclasses.replace(
+            model_input,
+            sampling_metadata=sampling_metadata,
+            is_prompt=is_prompt,
+            virtual_engine=virtual_engine
+        )
 
     def _prepare_voice_input_tensors(self, model_input: AvatarModelInput) -> AttentionMetadata:
         """Prepare input tensors for voice model by reshaping tokens and adjusting attention metadata.

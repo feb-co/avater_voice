@@ -68,7 +68,18 @@ def custom_init_cache_engine(self):
     bind_kv_cache(self.compilation_config.static_forward_context, self.gpu_cache)
 
 
+def custom_get_cache_block_size_bytes(self) -> int:
+    """Get the size of the KV cache block size in bytes.
+    """
+    return AvatarCacheEngine.get_cache_block_size(
+        self.cache_config,
+        self.model_config,
+        self.parallel_config
+    )
+
+
 def apply_patch() -> None:
     """Apply patch to replace Worker's init method"""
     Worker.__init__ = custom_worker_init
     Worker._init_cache_engine = custom_init_cache_engine
+    Worker.get_cache_block_size_bytes = custom_get_cache_block_size_bytes

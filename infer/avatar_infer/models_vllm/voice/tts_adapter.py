@@ -120,7 +120,6 @@ class TTSAdapterSelfAttention(nn.Module):
     def __init__(
         self,
         config: AvatarVoiceConfig,
-        attn_idx: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         prefix: str = ""
@@ -129,7 +128,6 @@ class TTSAdapterSelfAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
 
         self.config = config
-        self.attn_idx = attn_idx
         self.num_key_value_groups = 4
 
         self.hidden_size = config.tts_adapter_hidden_size
@@ -219,7 +217,6 @@ class TTSAdapterCrossAttention(nn.Module):
     def __init__(
         self,
         config: AvatarVoiceConfig,
-        attn_idx: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -228,7 +225,6 @@ class TTSAdapterCrossAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
 
         self.config = config
-        self.attn_idx = attn_idx
         self.num_key_value_groups = 4
 
         self.hidden_size = config.tts_adapter_hidden_size
@@ -319,33 +315,31 @@ class TTSAdapterBlock(nn.Module):
         self,
         config: AvatarVoiceConfig,
         block_idx: int,
-        attn_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = ""
     ):
         super().__init__()
+        prefix_list = prefix.split(".")
+        self.attn_idx = int(prefix_list[-1])
         self.block_idx = block_idx
-        self.attn_idx = attn_idx
         self.dropout = config.tts_adapter_dropout
         self.embed_dim = config.tts_adapter_hidden_size
 
         self.self_attn = TTSAdapterSelfAttention(
             config=config,
-            attn_idx=attn_idx,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            prefix=".".join(prefix_list[:-1]+[str(self.attn_idx)]) + ".self_attn",
         )
         self.self_attn_layer_norm = RMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
         if block_idx == 0:
             self.encoder_attn = TTSAdapterCrossAttention(
                 config=config,
-                attn_idx=attn_idx,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.encoder_attn",
+                prefix=".".join(prefix_list[:-1]+[str(self.attn_idx+1)]) + ".encoder_attn",
             )
             self.encoder_attn_layer_norm = RMSNorm(config.tts_adapter_hidden_size, eps=config.rms_norm_eps)
 
@@ -357,7 +351,7 @@ class TTSAdapterBlock(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor],
-        kv_cache: torch.Tensor,
+        kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
         # Self Attention
@@ -366,7 +360,7 @@ class TTSAdapterBlock(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
+            kv_cache=kv_caches[self.attn_idx],
             attn_metadata=attn_metadata
         )
         hidden_states = residual + hidden_states
@@ -377,7 +371,7 @@ class TTSAdapterBlock(nn.Module):
             hidden_states = self.encoder_attn_layer_norm(hidden_states)
             hidden_states = self.encoder_attn(
                 hidden_states=hidden_states,
-                kv_cache=kv_cache,
+                kv_cache=kv_caches[self.attn_idx+1],
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states,
             )
@@ -403,14 +397,17 @@ class TTSAdapterLayer(nn.Module):
         super().__init__()
         self.block = nn.ModuleList([])
         prefix_list = prefix.split(".")
-        self.layer_idx = int(prefix_list[-1])
+        layer_idx = int(prefix_list[-1])
         for block_idx in range(config.block_size):
-            attn_idx = self.layer_idx + (block_idx * config.tts_adapter_hidden_layers)
+            if block_idx == 0:
+                attn_idx = layer_idx*2
+            else:
+                attn_idx = layer_idx + (block_idx * config.tts_adapter_hidden_layers) + config.tts_adapter_hidden_layers
+
             laryer_prefix = ".".join(prefix_list[:-1]+[str(attn_idx)])
             self.block.append(TTSAdapterBlock(
                 config,
                 block_idx=block_idx,
-                attn_idx=attn_idx,
                 quant_config=quant_config,
                 cache_config=cache_config,
                 prefix=laryer_prefix
@@ -422,14 +419,14 @@ class TTSAdapterLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor],
-        kv_cache: torch.Tensor,
+        kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
         hidden_states = self.block[block_idx](
             positions,
             hidden_states,
             encoder_hidden_states,
-            kv_cache,
+            kv_caches,
             attn_metadata
         )
         return hidden_states
@@ -503,13 +500,12 @@ class TTSAdapter(nn.Module, SupportsLoRA, SupportsPP):
         attn_metadata: AttentionMetadata,
     ):
         for layer_idx, decoder_layer in enumerate(self.layers):
-            attn_idx = layer_idx + (block_idx * self.config.tts_adapter_hidden_layers)
             hidden_states = decoder_layer(
                 block_idx,
                 positions,
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                kv_cache=kv_caches[attn_idx],
+                kv_caches=kv_caches,
                 attn_metadata=attn_metadata
             )
 
