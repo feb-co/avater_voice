@@ -10,14 +10,6 @@ from vllm.utils import FlexibleArgumentParser
 from transformers.cache_utils import DynamicCache
 
 
-os.environ["AVATER_LLM_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
-os.environ["AVATER_TEXT_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/Meta-Llama-3.1-8B-Instruct"
-os.environ["AVATER_AUDIO_TOKENIZER_PATH"] = "/mnt/ceph/huggingface/AvateAduio-tokenizer"
-os.environ["AVATER_TTS_PATH"] = "/mnt/ceph/licheng/chat_model/tts/llama3.1_tts_8b/tts_2502_synthesis_from_sft/checkpoint-20000/"
-os.environ["AVATER_WHISPER_PATH"] = "/mnt/ceph/huggingface/whisper-large-v3/"
-os.environ["AVATER_WAVLM_PATH"] = "/mnt/ceph/huggingface/wavlm-large/"
-
-
 from avatar_infer.generation import AvatarLLM
 from avatar_infer.models.patcher import patch_model
 from avatar_infer.cache_utils import AvatarCache
