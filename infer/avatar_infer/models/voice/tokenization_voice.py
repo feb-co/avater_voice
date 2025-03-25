@@ -261,6 +261,7 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
         # text tokenizer init
         self.text_tokenizer = AutoTokenizer.from_pretrained(TEXT_TOKENIZER_PATH)
         self.bos_token = self.text_tokenizer.bos_token
+        self.eos_token_id = self.text_tokenizer.eos_token_id
         self.total_vocab_size = len(self.get_vocab())
 
         # audio encoder init
@@ -274,6 +275,8 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
         # audio tokenizer init
         if audio_special_token:
             self.audio_special_token = audio_special_token
+            self.boa_token_id = audio_special_token["boa_token"]
+            self.eoa_token_id = audio_special_token["eoa_token"]
             self.short_wait_string = short_wait_string
             self.long_wait_string = long_wait_string
             self.text_duration_token = text_duration_token
@@ -410,7 +413,8 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
             "use_fast": False,
             "device": self.device,
             "chat_template": self.chat_template,
-            "bos_token": self.bos_token
+            "bos_token": self.bos_token,
+            "eos_token_id": self.eos_token_id
         })
 
         if getattr(self, "audio_special_token", None):
@@ -420,6 +424,8 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
                 "audio_tokenizer": self.audio_tokenizer_type,
                 "text_duration_token": self.text_duration_token,
                 "audio_special_token": self.audio_special_token,
+                "boa_token_id": self.boa_token_id,
+                "eoa_token_id": self.eoa_token_id,
             })
 
         if getattr(self, "audio_downsample_layer", None):
@@ -614,6 +620,8 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
         **kwargs
     ) -> Union[Tuple[List, List], List]:
         if text:
+            if text.startswith(self.bos_token):
+                add_special_tokens = False
             text_token_ids = self.text_tokenizer.encode(
                 text=text,
                 add_special_tokens=add_special_tokens,
@@ -648,18 +656,18 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
                 for idx in range(len(codes)):
                     if add_audio_special_tokens:
                         if idx == 0:
-                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                            codes[idx] = [self.boa_token_id] + codes[idx] + [self.eoa_token_id]
                         else:
-                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                            codes[idx] = [self.boa_token_id] + codes[idx] + [self.eoa_token_id]
             else:
                 codes = self._encode_mimi_codes(audio_signal["array"])
                 codes = codes.tolist()
                 for idx in range(len(codes)):
                     if add_audio_special_tokens:
                         if idx == 0:
-                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                            codes[idx] = [self.boa_token_id] + codes[idx] + [self.eoa_token_id]
                         else:
-                            codes[idx] = [self.audio_special_token["boa_token"]] + codes[idx] + [self.audio_special_token["eoa_token"]]
+                            codes[idx] = [self.boa_token_id] + codes[idx] + [self.eoa_token_id]
 
             return (text_token_ids, codes)
         else:

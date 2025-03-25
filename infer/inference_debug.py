@@ -132,7 +132,7 @@ def main(args, chat_conversation):
 
     print("=" * 80)
 
-    outputs = avatar_generator.chat(chat_conversation, sampling_params, use_tqdm=False)
+    outputs = avatar_generator.chat(chat_conversation, sampling_params, use_tqdm=True)
     print_outputs(outputs)
 
     llm_outputs = avatar_generator.tokenizer.text_tokenizer.decode(llm_outputs[0])

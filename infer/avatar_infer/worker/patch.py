@@ -4,7 +4,6 @@ from vllm.config import VllmConfig
 from vllm.worker.model_runner import GPUModelRunnerBase
 from vllm.worker.worker import Worker
 
-
 from .avatar_model_runner import AvatarModelRunner
 from .avatar_cache_engine import AvatarCacheEngine, bind_kv_cache
 

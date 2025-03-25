@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
 import torch
 from torch import nn
 
-from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention import AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -31,8 +31,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
-
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -43,6 +41,7 @@ from vllm.model_executor.models.utils import (
 
 
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
+from avatar_infer.models_vllm.attention import Attention
 
 
 class TTSAdapterHead(nn.Module):

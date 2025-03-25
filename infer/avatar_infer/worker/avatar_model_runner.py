@@ -4,7 +4,7 @@ import dataclasses
 import itertools
 import weakref
 from tqdm import tqdm
-from typing import Any, Dict, List, Optional, Tuple, Type, cast
+from typing import Any, Dict, List, Optional, Tuple, Type, cast, Set
 
 import torch
 import torch.distributed
@@ -21,6 +21,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.prompt_adapter.layers import PromptAdapterMapping
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceGroupMetadata)
 from vllm.worker.model_runner import (
@@ -34,6 +35,7 @@ from vllm.utils import GiB_bytes
 
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
 from .avatar_cache_engine import get_avatar_param
+from .forward_avatar_context import set_tts_forward_context
 
 
 logger = init_logger(__name__)
@@ -44,6 +46,8 @@ class AvatarModelInput(ModelInputForGPUWithSamplingMetadata):
     """Used by the AvatarModelInput."""
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
+    encoder_attn_metadata: Optional["AttentionMetadata"] = None
+    encoder_sampling_metadata: Optional["SamplingMetadata"] = None    
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -57,6 +61,7 @@ class AvatarModelInput(ModelInputForGPUWithSamplingMetadata):
             "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.encoder_attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict, self.sampling_metadata)
         return tensor_dict
 
@@ -135,15 +140,17 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         self.avatar_config: AvatarVoiceConfig = original_model_runner.vllm_config.model_config.hf_config
         self._model_input_cls: Type[AvatarModelInput] = AvatarModelInput
         self.builder = self._builder_cls(weakref.proxy(self))
-        self.tts_adapter_head_size = self.model_config.hf_config.tts_adapter_hidden_size//self.model_config.hf_config.tts_adapter_attention_heads
-        self.tts_adapter_attn_backend = get_attn_backend(
-            self.tts_adapter_head_size,
+        self.tts_head_size = self.model_config.hf_config.tts_adapter_hidden_size//self.model_config.hf_config.tts_adapter_attention_heads
+        self.tts_attn_backend = get_attn_backend(
+            self.tts_head_size,
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
         )
+        if self.tts_attn_backend:
+            self.tts_attn_state = self.tts_attn_backend.get_state_cls()(weakref.proxy(self))
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
@@ -202,7 +209,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
                 device=self.device)
 
         # Execute graph capture
-        with self.attn_state.graph_capture(max_batch_size), graph_capture(self.device) as graph_capture_context:
+        with self.attn_state.graph_capture(max_batch_size), self.tts_attn_state.graph_capture(max_batch_size), graph_capture(self.device) as graph_capture_context:
             for virtual_engine in range(self.parallel_config.pipeline_parallel_size):
                 # Only print progress bar on rank 0
                 cudagraph_capture_sizes = (
@@ -215,7 +222,12 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
                 for batch_size in cudagraph_capture_sizes:
                     # Prepare attention metadata
-                    attn_metadata = self.attn_state.graph_capture_get_metadata_for_batch(
+                    encoder_attn_metadata = self.attn_state.graph_capture_get_metadata_for_batch(
+                        batch_size,
+                        is_encoder_decoder_model=False
+                    )
+                    encoder_attn_metadata.enable_kv_scales_calculation = False
+                    attn_metadata = self.tts_attn_state.graph_capture_get_metadata_for_batch(
                         batch_size,
                         is_encoder_decoder_model=False
                     )
@@ -252,6 +264,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
                         "intermediate_inputs": intermediate_inputs[:batch_size] if intermediate_inputs is not None else None,
                         "kv_caches": kv_caches[virtual_engine],
                         "attn_metadata": attn_metadata,
+                        "encoder_attn_metadata": encoder_attn_metadata,
                         "memory_pool": self.graph_memory_pool,
                         "stream": graph_capture_context.stream
                     }
@@ -266,7 +279,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
                         })
 
                     # Execute capture
-                    with set_forward_context(attn_metadata, self.vllm_config, virtual_engine):
+                    with set_forward_context(encoder_attn_metadata, self.vllm_config, virtual_engine), set_tts_forward_context(attn_metadata, self.vllm_config, virtual_engine):
                         graph_runner.capture(**capture_inputs)
 
                     self.graph_memory_pool = graph_runner.graph.pool()
@@ -306,7 +319,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        with set_forward_context(model_input.attn_metadata, self.vllm_config, model_input.virtual_engine):
+        with set_forward_context(model_input.encoder_attn_metadata, self.vllm_config, model_input.virtual_engine), set_tts_forward_context(model_input.attn_metadata, self.vllm_config, model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -314,11 +327,16 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
                 encoder_positions=model_input.encoder_input_positions,
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
+                encoder_attn_metadata=model_input.encoder_attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs, device=self.device),
                 **seqlen_agnostic_kwargs)
 
-        logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
+        logits = self.model.compute_logits(
+            hidden_or_intermediate_states,
+            model_input.sampling_metadata,
+            model_input.encoder_sampling_metadata
+        )
 
         if not self.is_driver_worker:
             return []
@@ -330,6 +348,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
+            encoder_sampling_metadata=model_input.encoder_sampling_metadata
         )
 
         return [output]
@@ -425,32 +444,47 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         Since chunked prefill is not supported for encoder/decoder models, `input_tokens` is assumed to be either entirely 
         prefill tokens or entirely decode tokens.
         """
-        model_input = self._prepare_model_input_tensors(seq_group_metadata_list, finished_requests_ids)
-        input_tokens, input_positions, attn_metadata = self._prepare_voice_input_tensors(model_input)
-        model_input = dataclasses.replace(
-            model_input,
-            input_tokens=input_tokens,
-            input_positions=input_positions,
-            attn_metadata=attn_metadata,
-        )
+        llm_seqs = []
+        tts_seqs = []
+        for seq in seq_group_metadata_list:
+            llm_seq = SequenceGroupMetadata(
+                request_id=seq.request_id,
+                is_prompt=True,
+                seq_data={seq.request_id: seq.encoder_seq_data},
+                sampling_params=seq.sampling_params,
+                block_tables=None,
+                multi_modal_data=seq.multi_modal_data,
+                multi_modal_placeholders=seq.multi_modal_placeholders
+            )
+            tts_seq = SequenceGroupMetadata(
+                request_id=seq.request_id,
+                is_prompt=True,
+                seq_data=seq.seq_data,
+                sampling_params=seq.sampling_params,
+                block_tables=None,
+                multi_modal_data=None,
+                multi_modal_placeholders=None
+            )
+            llm_seqs.append(llm_seq)
+            tts_seqs.append(tts_seq)
 
-        encoder_input_tokens_tensor, encoder_input_positions_tensor = (
-            self._prepare_encoder_model_input_tensors(seq_group_metadata_list, model_input)
-        )
-
-        # Inject attn_metadata encoder/cross-attention fields & encoder input tokens/positions into model_input.
-        # Frozen dataclass fields cannot be modified, so use dataclasses.replace to construct a new model input instance.
-        model_input = dataclasses.replace(
-            model_input,
-            encoder_input_tokens=encoder_input_tokens_tensor,
-            encoder_input_positions=encoder_input_positions_tensor,
-        )
+        llm_model_input = self._prepare_model_input_tensors(llm_seqs, finished_requests_ids)
+        tts_model_input = self._prepare_model_input_tensors(tts_seqs, finished_requests_ids)
+        input_tokens, input_positions, attn_metadata = self._prepare_voice_input_tensors(tts_model_input)
 
         generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list,
-            model_input.seq_lens,
-            model_input.query_lens,
+        llm_sampling_metadata = SamplingMetadata.prepare(
+            llm_seqs,
+            llm_model_input.seq_lens,
+            llm_model_input.query_lens,
+            self.device,
+            self.pin_memory,
+            generators=generators
+        )
+        tts_sampling_metadata = SamplingMetadata.prepare(
+            tts_seqs,
+            [item//self.avatar_config.code_layers for item in tts_model_input.seq_lens],
+            [item//self.avatar_config.code_layers for item in tts_model_input.seq_lens],
             self.device,
             self.pin_memory,
             generators=generators
@@ -458,12 +492,21 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
         is_prompt = seq_group_metadata_list[0].is_prompt if seq_group_metadata_list else None
 
-        return dataclasses.replace(
-            model_input,
-            sampling_metadata=sampling_metadata,
+        model_input = dataclasses.replace(
+            tts_model_input,
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            encoder_input_tokens=llm_model_input.input_tokens,
+            encoder_input_positions=llm_model_input.input_positions,
+            encoder_attn_metadata=llm_model_input.attn_metadata,
+            sampling_metadata=tts_sampling_metadata,
+            encoder_sampling_metadata=llm_sampling_metadata,
             is_prompt=is_prompt,
             virtual_engine=virtual_engine
         )
+
+        return model_input
 
     def _prepare_voice_input_tensors(self, model_input: AvatarModelInput) -> AttentionMetadata:
         """Prepare input tensors for voice model by reshaping tokens and adjusting attention metadata.
@@ -482,9 +525,10 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         # Update attention metadata dimensions
         attn_metadata = model_input.attn_metadata
         assert attn_metadata is not None
-        
+
         # Adjust all sequence length related fields by dividing by code_layers
         attn_metadata.num_prefill_tokens //= code_layers
+        # attn_metadata.slot_mapping = [-1]
         attn_metadata.seq_lens = [item // code_layers for item in attn_metadata.seq_lens]
         attn_metadata.seq_lens_tensor //= code_layers
         attn_metadata.max_prefill_seq_len //= code_layers

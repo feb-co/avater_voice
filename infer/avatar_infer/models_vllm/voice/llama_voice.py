@@ -6,12 +6,18 @@ from torch import nn
 
 from transformers import AutoModelForCausalLM
 
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData, InputContext, token_inputs)
+from vllm.inputs import (
+    INPUT_REGISTRY,
+    EncoderDecoderInputs,
+    DummyData,
+    InputContext,
+    token_inputs
+)
 from vllm.attention import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import BitsAndBytesModelLoader, LoadConfig, LoadFormat
@@ -29,7 +35,7 @@ from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
 from avatar_infer.generation.sequence import VoiceSequenceData
 
 
-def dummy_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
+def dummy_decoder_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
     avatar_config: AvatarVoiceConfig = ctx.model_config.hf_config
     # tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
@@ -62,7 +68,17 @@ def dummy_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mappi
     return DummyData(seq_data)
 
 
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llama_voice)
+def input_processor_for_llama_voice(ctx: InputContext, inputs, **mm_processor_kwargs):
+    avatar_config: AvatarVoiceConfig = ctx.model_config.hf_config
+
+    deocder = token_inputs(
+        prompt_token_ids=[avatar_config.boa_token_id] * avatar_config.code_layers
+    )
+    return EncoderDecoderInputs(encoder=inputs, decoder=deocder)
+
+
+@INPUT_REGISTRY.register_dummy_data(dummy_decoder_data_for_llama_voice)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_llama_voice)
 class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -80,7 +96,21 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
         self.tts_adapter = TTSAdapter(vllm_config=vllm_config, prefix="tts_adapter")
 
         # re-init args
-        self.llm__hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+        self.llm_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+
+        # sample param
+        self.sampler = get_sampler()
+        if get_pp_group().is_last_rank:
+            self.llm_logits_processor = LogitsProcessor(
+                self.llm.unpadded_vocab_size,
+                config.vocab_size,
+                getattr(config, "logit_scale", 1.0)
+            )
+            self.tts_logits_processor = LogitsProcessor(
+                config.audio_vocab_size,
+                config.audio_vocab_size,
+                getattr(config, "logit_scale", 1.0)
+            )
 
     def forward(
         self,
@@ -90,50 +120,56 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
         encoder_positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        encoder_attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        r"""
-        Args:
-            input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            positions
-                Positions of *decoder* input sequence tokens.
-            encoder_input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-            encoder_positions:
-                Positions of *encoder* input sequence tokens.
-            kv_caches:
-                Layer-wise list of KV cache tensors
-            attn_metadata:
-                vLLM Attention metadata structure
-        Returns:
-            Model output torch.Tensor
-        """
-        # Run encoder attention if a non-zero number of encoder tokens are provided as input
         encoder_hidden_states = self.llm(
             input_ids=encoder_input_ids,
             positions=encoder_positions,
-            kv_caches=kv_caches[:self.llm__hidden_layers],
-            attn_metadata=attn_metadata,
+            kv_caches=kv_caches[:self.llm_hidden_layers],
+            attn_metadata=encoder_attn_metadata,
             intermediate_tensors=intermediate_tensors
         )
+        
+        if not get_pp_group().is_last_rank or isinstance(encoder_hidden_states, IntermediateTensors):
+            return encoder_hidden_states
 
-        # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_hidden_states = self.tts_adapter(
             input_ids=input_ids,
             positions=positions,
             encoder_hidden_states=encoder_hidden_states,
-            kv_caches=kv_caches[self.llm__hidden_layers:],
+            kv_caches=kv_caches[self.llm_hidden_layers:],
             attn_metadata=attn_metadata
         )
 
         return IntermediateTensors({
-            "encoder_hidden_states": encoder_hidden_states,
-            "decoder_hidden_states": decoder_hidden_states
+            "llm_hidden_states": encoder_hidden_states,
+            "tts_hidden_states": decoder_hidden_states
         })
+
+    def compute_logits(
+        self,
+        hidden_states: IntermediateTensors,
+        sampling_metadata: SamplingMetadata,
+        encoder_sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        llm_hidden_states = hidden_states["llm_hidden_states"]
+        logits = self.llm.logits_processor(
+            self.llm.lm_head,
+            llm_hidden_states,
+            encoder_sampling_metadata
+        )
+        return logits
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        encoder_sampling_metadata: SamplingMetadata
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, encoder_sampling_metadata)
+        return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loaded_params: Set[str] = set()
