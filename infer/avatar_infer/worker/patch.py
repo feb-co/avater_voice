@@ -1,9 +1,11 @@
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 from vllm.config import VllmConfig
+from vllm.entrypoints.llm import LLM
 from vllm.worker.model_runner import GPUModelRunnerBase
 from vllm.worker.worker import Worker
 
+from .avatar_llm_engine import AvatarLLMEngine
 from .avatar_model_runner import AvatarModelRunner
 from .avatar_cache_engine import AvatarCacheEngine, bind_kv_cache
 
@@ -11,6 +13,10 @@ from .avatar_cache_engine import AvatarCacheEngine, bind_kv_cache
 # Save original init method
 original_worker_init = Worker.__init__
 original_init_cache_engine = Worker._init_cache_engine
+
+
+def custom_engine_class(self):
+    return AvatarLLMEngine
 
 
 def custom_worker_init(
@@ -68,7 +74,8 @@ def custom_init_cache_engine(self):
 
 
 def custom_get_cache_block_size_bytes(self) -> int:
-    """Get the size of the KV cache block size in bytes.
+    """
+    Get the size of the KV cache block size in bytes.
     """
     return AvatarCacheEngine.get_cache_block_size(
         self.cache_config,
@@ -78,7 +85,10 @@ def custom_get_cache_block_size_bytes(self) -> int:
 
 
 def apply_patch() -> None:
-    """Apply patch to replace Worker's init method"""
+    # Engine patch
+    LLM.get_engine_class = custom_engine_class
+
+    # Worker patch
     Worker.__init__ = custom_worker_init
     Worker._init_cache_engine = custom_init_cache_engine
     Worker.get_cache_block_size_bytes = custom_get_cache_block_size_bytes

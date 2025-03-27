@@ -14,25 +14,20 @@ from vllm.inputs import (
     token_inputs
 )
 from vllm.attention import AttentionMetadata
-from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.model_loader.loader import BitsAndBytesModelLoader, LoadConfig, LoadFormat
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.layers.sampler import get_sampler
 from vllm.sequence import IntermediateTensors
 
 from vllm.model_executor.models import llama, VllmModelForTextGeneration
 
 from .tts_adapter import TTSAdapter
+from avatar_infer.models_vllm.layers.sample import get_avatar_sampler
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
-from avatar_infer.generation.sequence import VoiceSequenceData
+from avatar_infer.generation.sequence import AvatarSequenceData, AvatarSamplerOutput
+
 
 
 def dummy_decoder_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
@@ -64,7 +59,7 @@ def dummy_decoder_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_count
     #                                    item_size=image_feature_size)
     # }
 
-    seq_data = VoiceSequenceData.from_prompt_token_counts(avatar_config.code_layers, (0, seq_len))
+    seq_data = AvatarSequenceData.from_prompt_token_counts(avatar_config.code_layers, (0, seq_len))
     return DummyData(seq_data)
 
 
@@ -99,7 +94,8 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
         self.llm_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
 
         # sample param
-        self.sampler = get_sampler()
+        self.llm_sampler = get_sampler()
+        self.tts_sampler = get_avatar_sampler()
         if get_pp_group().is_last_rank:
             self.llm_logits_processor = LogitsProcessor(
                 self.llm.unpadded_vocab_size,
@@ -131,7 +127,7 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
             attn_metadata=encoder_attn_metadata,
             intermediate_tensors=intermediate_tensors
         )
-        
+
         if not get_pp_group().is_last_rank or isinstance(encoder_hidden_states, IntermediateTensors):
             return encoder_hidden_states
 
@@ -155,21 +151,41 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
         encoder_sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         llm_hidden_states = hidden_states["llm_hidden_states"]
-        logits = self.llm.logits_processor(
+        llm_logits = self.llm_logits_processor(
             self.llm.lm_head,
             llm_hidden_states,
             encoder_sampling_metadata
         )
-        return logits
+
+        tts_hidden_states = hidden_states["tts_hidden_states"]
+        tts_logits_cat = []
+        for idx in range(self.config.code_layers):
+            tts_logits = self.tts_logits_processor(
+                self.tts_adapter.adapter_head.head_block[idx],
+                tts_hidden_states[..., idx*self.config.tts_adapter_hidden_size:(idx+1)*self.config.tts_adapter_hidden_size],
+                sampling_metadata
+            )
+            tts_logits_cat.append(tts_logits)
+        tts_logits_cat = torch.cat(tts_logits_cat, dim=-1).view(-1, self.config.code_layers, self.tts_adapter.adapter_head.vocab_size)
+        return IntermediateTensors({
+            "llm_logits": llm_logits,
+            "tts_logits": tts_logits_cat
+        })
 
     def sample(
         self,
-        logits: torch.Tensor,
+        logits: IntermediateTensors,
         sampling_metadata: SamplingMetadata,
         encoder_sampling_metadata: SamplingMetadata
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, encoder_sampling_metadata)
-        return next_tokens
+    ) -> Optional[AvatarSamplerOutput]:
+        llm_logits = logits["llm_logits"]
+        tts_logits = logits["tts_logits"]
+        llm_next_tokens = self.llm_sampler(llm_logits, encoder_sampling_metadata)
+        tts_next_tokens = self.tts_sampler(tts_logits, sampling_metadata)
+        return AvatarSamplerOutput(
+            llm_outputs=llm_next_tokens.outputs,
+            tts_outputs=tts_next_tokens.outputs
+        )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
         loaded_params: Set[str] = set()

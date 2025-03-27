@@ -41,7 +41,7 @@ from vllm.model_executor.models.utils import (
 
 
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
-from avatar_infer.models_vllm.attention import Attention
+from avatar_infer.models_vllm.layers import Attention
 
 
 class TTSAdapterHead(nn.Module):
@@ -67,7 +67,7 @@ class TTSAdapterHead(nn.Module):
                     org_num_embeddings=self.vocab_size,
                     bias=False,
                     padding_size=(
-                        DEFAULT_VOCAB_PADDING_SIZE
+                        8
                         # We need bigger padding if using lora for kernel
                         # compatibility
                         if not lora_config else
@@ -76,9 +76,6 @@ class TTSAdapterHead(nn.Module):
                     prefix=f"{prefix}.head_block.{idx}",
                 )
             )
-
-    def forward(self, block_idx, hidden_states: torch.Tensor):
-        return self.head_block[block_idx](hidden_states)
 
 
 class TTSAdapterMLP(nn.Module):

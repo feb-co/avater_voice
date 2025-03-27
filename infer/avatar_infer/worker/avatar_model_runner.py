@@ -118,10 +118,36 @@ class AvatarModelInputForGPUBuilder(ModelInputForGPUBuilder):
             self.scheduler_config is not None
             and self.scheduler_config.chunked_prefill_enabled)
         if self.sliding_window is not None:
-            self.sliding_window_blocks = (
-                self.sliding_window + self.block_size - 1) // self.block_size
-            self.block_aligned_sliding_window = \
-                self.sliding_window_blocks * self.block_size
+            self.sliding_window_blocks = (self.sliding_window + self.block_size - 1) // self.block_size
+            self.block_aligned_sliding_window = self.sliding_window_blocks * self.block_size
+    
+    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
+        """Add a sequence group to the builder."""
+        seq_ids = seq_group_metadata.seq_data.keys()
+        n_seqs = len(seq_ids)
+        is_prompt = seq_group_metadata.is_prompt
+
+        if is_prompt:
+            assert n_seqs == 1
+            self.decode_only = False
+
+        inter_data = self.init_cached_inter_data(
+            request_id=seq_group_metadata.request_id,
+            seq_ids=seq_ids,
+            is_prompt=is_prompt,
+            block_tables=seq_group_metadata.block_tables,
+            computed_block_nums=seq_group_metadata.computed_block_nums,
+            reinit=True,
+            reinit_use_defaults=True,
+            encoder_seq_len=0)
+
+        self.inter_data_list.append(inter_data)
+
+        for seq_idx in range(n_seqs):
+            for per_seq_fn in self.per_seq_compute_fns:
+                per_seq_fn(inter_data, seq_idx, seq_group_metadata)
+        for per_seq_group_fn in self.per_seq_group_compute_fns:
+            per_seq_group_fn(inter_data, seq_group_metadata)
 
 
 class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
@@ -319,6 +345,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+        print(model_input.input_tokens, "((()))")
         with set_forward_context(model_input.encoder_attn_metadata, self.vllm_config, model_input.virtual_engine), set_tts_forward_context(model_input.attn_metadata, self.vllm_config, model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
@@ -420,7 +447,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         # the `dtype` argument does not matter, and we use `float32` as a placeholder (it has wide hardware support).
         kv_caches = [torch.tensor([], dtype=torch.float32, device=self.device) for _ in range(num_layers)]
         finished_requests_ids = [seq.request_id for seq in seqs]
-        model_input = self.prepare_model_input(seqs, finished_requests_ids=finished_requests_ids)
+        model_input = self.prepare_model_input(seqs, finished_requests_ids=finished_requests_ids, is_prompt=True)
         intermediate_tensors = None
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
@@ -436,7 +463,8 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
+        is_prompt=None,
     ) -> AvatarModelInput:
         """
         Prepare the model input based on a given sequence group, including metadata for the sampling step.
@@ -444,12 +472,14 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         Since chunked prefill is not supported for encoder/decoder models, `input_tokens` is assumed to be either entirely 
         prefill tokens or entirely decode tokens.
         """
+        generators = self.get_generators(finished_requests_ids)
+
         llm_seqs = []
         tts_seqs = []
         for seq in seq_group_metadata_list:
             llm_seq = SequenceGroupMetadata(
                 request_id=seq.request_id,
-                is_prompt=True,
+                is_prompt=seq.is_prompt,
                 seq_data={seq.request_id: seq.encoder_seq_data},
                 sampling_params=seq.sampling_params,
                 block_tables=None,
@@ -458,21 +488,18 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
             )
             tts_seq = SequenceGroupMetadata(
                 request_id=seq.request_id,
-                is_prompt=True,
+                is_prompt=seq.is_prompt,
                 seq_data=seq.seq_data,
                 sampling_params=seq.sampling_params,
                 block_tables=None,
                 multi_modal_data=None,
                 multi_modal_placeholders=None
             )
+
             llm_seqs.append(llm_seq)
             tts_seqs.append(tts_seq)
 
         llm_model_input = self._prepare_model_input_tensors(llm_seqs, finished_requests_ids)
-        tts_model_input = self._prepare_model_input_tensors(tts_seqs, finished_requests_ids)
-        input_tokens, input_positions, attn_metadata = self._prepare_voice_input_tensors(tts_model_input)
-
-        generators = self.get_generators(finished_requests_ids)
         llm_sampling_metadata = SamplingMetadata.prepare(
             llm_seqs,
             llm_model_input.seq_lens,
@@ -481,19 +508,23 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
             self.pin_memory,
             generators=generators
         )
+
+        tts_model_input = self._prepare_model_input_tensors(tts_seqs, finished_requests_ids)
+        (seq_lens, query_lens, input_tokens, input_positions, attn_metadata) \
+        = self._prepare_voice_input_tensors(tts_model_input)
         tts_sampling_metadata = SamplingMetadata.prepare(
             tts_seqs,
-            [item//self.avatar_config.code_layers for item in tts_model_input.seq_lens],
-            [item//self.avatar_config.code_layers for item in tts_model_input.seq_lens],
+            seq_lens,
+            query_lens,
             self.device,
             self.pin_memory,
             generators=generators
         )
 
-        is_prompt = seq_group_metadata_list[0].is_prompt if seq_group_metadata_list else None
-
         model_input = dataclasses.replace(
             tts_model_input,
+            seq_lens=seq_lens,
+            query_lens=query_lens,
             input_tokens=input_tokens,
             input_positions=input_positions,
             attn_metadata=attn_metadata,
@@ -505,6 +536,9 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
             is_prompt=is_prompt,
             virtual_engine=virtual_engine
         )
+
+        # if len(seq_group_metadata_list[0].seq_data[list(seq_group_metadata_list[0].seq_data.keys())[0]].output_token_ids)>0:
+        #     import pdb; pdb.set_trace()
 
         return model_input
 
@@ -520,6 +554,8 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         code_layers = self.avatar_config.code_layers
 
         # Reshape input tokens to (batch_size * code_layers)
+        seq_lens = [item//self.avatar_config.code_layers for item in model_input.seq_lens]
+        query_lens = [item//self.avatar_config.code_layers for item in model_input.query_lens]
         input_tokens = model_input.input_tokens.view(-1, code_layers)
 
         # Update attention metadata dimensions
@@ -528,136 +564,21 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
         # Adjust all sequence length related fields by dividing by code_layers
         attn_metadata.num_prefill_tokens //= code_layers
-        # attn_metadata.slot_mapping = [-1]
         attn_metadata.seq_lens = [item // code_layers for item in attn_metadata.seq_lens]
         attn_metadata.seq_lens_tensor //= code_layers
+        attn_metadata.seq_start_loc //= code_layers
         attn_metadata.max_prefill_seq_len //= code_layers
         attn_metadata.max_query_len //= code_layers
+        attn_metadata.max_decode_seq_len //= code_layers
+        attn_metadata.max_decode_query_len //= code_layers
+        attn_metadata.num_decode_tokens //= code_layers
         attn_metadata.query_start_loc //= code_layers
-        attn_metadata.seq_start_loc //= code_layers
+        attn_metadata.context_lens_tensor //= code_layers
+        attn_metadata.slot_mapping = attn_metadata.slot_mapping.view(len(attn_metadata.seq_lens), -1)[:, -1:].contiguous().view(-1)
 
         # Reshape input positions tensor
-        input_positions = (model_input.input_positions
-                         .view(len(attn_metadata.seq_lens), -1)
-                         [:, :attn_metadata.seq_lens[0]]
-                         .contiguous()
-                         .view(-1))
+        input_positions = model_input.input_positions.view(len(attn_metadata.seq_lens), -1)
+        col_indices = torch.arange(0, input_positions.shape[1], 8, device=input_positions.device)
+        input_positions = (input_positions[:, col_indices]//code_layers).view(-1)
 
-        return input_tokens, input_positions, attn_metadata
-
-    def _prepare_encoder_model_input_tensors(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        model_input: AvatarModelInput,
-    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """
-        Helper method to prepare the encoder- and cross-attn-related model inputs based on a given sequence group. 
-        These additional inputs are used to augment an already-computed `AvatarModelInput` data structure which already 
-        has decoder-related model inputs populated.
-
-        Sets the following attn_metadata fields:
-        * `num_encoder_tokens`
-        * `encoder_seq_lens`
-        * `encoder_seq_lens_tensor`
-        * `max_encoder_seq_len`
-
-        Constructs a new model inputs data structure, based on:
-        1) the existing fields in the `model_inputs` argument
-        Constructs a new model inputs data structure, based on
-        (1) the existing fields in the `model_inputs` argument,
-        and (2) the following additional fields which are
-        computed (or in the case of `attn_metadata`, updated) 
-        by this function:
-        * attn_metadata
-        * encoder_input_tokens
-        * encoder_input_positions
-
-        Arguments:
-
-        * seq_group_metadata_list: list of sequence groups for which to
-                                   compute inputs
-        * model_inputs: model inputs data structure with decoder-oriented
-                        fields already computed.
-
-        Return:
-
-        * Updated model inputs data structure
-        """
-
-        if len(seq_group_metadata_list) == 0:
-            return (model_input.attn_metadata, None, None)
-
-        # Since we are not supporting chunked prefill either the entire
-        # batch is prefill or it is decode
-        is_prompt = seq_group_metadata_list[0].is_prompt
-
-        # Build encoder inputs
-        encoder_seq_lens: List[int] = []
-        if is_prompt:
-            # Extract input tokens/positions, cross-attention slot-mapping,
-            # & seq len from each sequence group metadata
-            (
-                encoder_input_tokens,
-                encoder_input_positions,
-            ) = (
-                [],
-                [],
-            )
-            for seq_group_metadata in seq_group_metadata_list:
-                # Build seq lens
-                seq_len = seq_group_metadata.encoder_seq_data.get_len()
-                token_ids = seq_group_metadata.encoder_seq_data.get_token_ids()
-                encoder_seq_lens.append(seq_len)
-
-                # Build encoder input tokens
-                encoder_input_tokens.extend(token_ids)
-                encoder_input_positions.extend(list(range(0, seq_len)))
-
-            # Convert tokens/positions & cross-attention
-            # slot-mapping to encoder input tensors
-            encoder_input_tokens_tensor = self._list_to_long_tensor(encoder_input_tokens)
-            encoder_input_positions_tensor = self._list_to_long_tensor(encoder_input_positions)
-        else:
-            # Decode phase.
-            encoder_input_tokens_tensor = self._empty_long_tensor()
-            encoder_input_positions_tensor = self._empty_long_tensor()
-            # Extract cross-attention block tables &
-            # seq len from each sequence group metadata.
-            # Cross-attention block tables are empty
-            # during vLLM memory profiling.
-            for seq_group_metadata in seq_group_metadata_list:
-                for _ in range(len(seq_group_metadata.seq_data)):
-                    encoder_seq_lens.append(seq_group_metadata.encoder_seq_data.get_len())
-
-            if (model_input.attn_metadata is not None and model_input.attn_metadata.use_cuda_graph):
-                batch_size = len(encoder_seq_lens)
-                graph_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
-                assert graph_batch_size >= batch_size
-                cuda_graph_pad_size = graph_batch_size - batch_size
-                encoder_seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
-
-        # Compute encoder sequence lengths & encoder
-        # sequence starting offset tensors
-        encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
-        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
-                                            1,
-                                            dtype=torch.int32,
-                                            device=self.device)
-        torch.cumsum(encoder_seq_lens_tensor,
-                     dim=0,
-                     dtype=encoder_seq_start_loc.dtype,
-                     out=encoder_seq_start_loc[1:])
-
-        return (encoder_input_tokens_tensor, encoder_input_positions_tensor)
-
-    def _list_to_int32_tensor(
-        self,
-        _list: List[int],
-    ) -> torch.Tensor:
-        return torch.tensor(_list, dtype=torch.int32, device=self.device)
-
-    def _list_to_long_tensor(
-        self,
-        _list: List[int],
-    ) -> torch.Tensor:
-        return torch.tensor(_list, dtype=torch.long, device=self.device)
+        return seq_lens, query_lens, input_tokens, input_positions, attn_metadata
