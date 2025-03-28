@@ -8,7 +8,7 @@ from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 
 from transformers.cache_utils import DynamicCache
 
-from avatar_infer.worker.patch import apply_patch
+from avatar_infer.generation.patch import apply_patch
 from avatar_infer.cache_utils import AvatarCache, AvatarTokenCache
 from .text_generator import LLMGenerator 
 from .voice_generator import VoiceGenerator

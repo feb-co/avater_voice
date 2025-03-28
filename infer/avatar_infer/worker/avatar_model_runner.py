@@ -1,7 +1,6 @@
 import time
 import inspect
 import dataclasses
-import itertools
 import weakref
 from tqdm import tqdm
 from typing import Any, Dict, List, Optional, Tuple, Type, cast, Set
@@ -33,9 +32,13 @@ from vllm.worker.model_runner import (
 from vllm.worker.model_runner_base import (_add_attn_metadata_broadcastable_dict, _add_sampling_metadata_broadcastable_dict)
 from vllm.utils import GiB_bytes
 
-from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
 from .avatar_cache_engine import get_avatar_param
 from .forward_avatar_context import set_tts_forward_context
+from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
+from avatar_infer.dataclass.sequence import (
+    AvatarSequenceGroup,
+    AvatarSequenceGroupMetadata,
+)
 
 
 logger = init_logger(__name__)
@@ -345,7 +348,9 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        print(model_input.input_tokens, "((()))")
+        if model_input.input_tokens.size(0)<100:
+            print(model_input.encoder_input_tokens, model_input.encoder_input_positions, model_input.encoder_attn_metadata, "((()))")
+            # import pdb; pdb.set_trace()
         with set_forward_context(model_input.encoder_attn_metadata, self.vllm_config, model_input.virtual_engine), set_tts_forward_context(model_input.attn_metadata, self.vllm_config, model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
@@ -399,42 +404,39 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
             seq_len = (max_num_batched_tokens // max_num_seqs + (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            decoder_dummy_data = self.input_registry.dummy_data_for_profiling(
+            llm_dummy_data = self.input_registry.dummy_data_for_profiling(
+                self.model_config,
+                seq_len,
+                self.mm_registry,
+                is_encoder_data=True
+            )
+            tts_dummy_data = self.input_registry.dummy_data_for_profiling(
                 self.model_config,
                 seq_len,
                 self.mm_registry,
                 is_encoder_data=False
             )
 
-            encoder_dummy_data = self.input_registry.dummy_data_for_profiling(
-                self.model_config,
-                seq_len,
-                self.mm_registry,
-                is_encoder_data=True
-            )
-
-            # Having more tokens is over-conservative but otherwise fine
-            assert len(decoder_dummy_data.seq_data.prompt_token_ids) >= seq_len, (
-                f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(decoder_dummy_data.seq_data.prompt_token_ids)}"
-            )
-
-            assert decoder_dummy_data.multi_modal_data is None or encoder_dummy_data.multi_modal_data is None, (
-                "Multi-modal data can't be provided in both encoder and decoder"
-            )
-
-            seq = SequenceGroupMetadata(
+            llm_seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: decoder_dummy_data.seq_data},
+                seq_data={group_id: llm_dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                encoder_seq_data=encoder_dummy_data.seq_data,
-                cross_block_table=None,
-                multi_modal_data=decoder_dummy_data.multi_modal_data or encoder_dummy_data.multi_modal_data,
-                multi_modal_placeholders=decoder_dummy_data.multi_modal_placeholders or encoder_dummy_data.multi_modal_placeholders
+                multi_modal_data=llm_dummy_data.multi_modal_data,
+                multi_modal_placeholders=llm_dummy_data.multi_modal_placeholders
             )
-            seqs.append(seq)
+            tts_seq = SequenceGroupMetadata(
+                request_id=str(group_id),
+                is_prompt=True,
+                seq_data={group_id: tts_dummy_data.seq_data},
+                sampling_params=sampling_params,
+                block_tables=None,
+            )
+            seqs.append(AvatarSequenceGroupMetadata(
+                llm_seq_group_metadata=llm_seq,
+                tts_seq_group_metadata=tts_seq
+            ))
 
         # Run the model with the dummy inputs.
         (
@@ -446,7 +448,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         # use an empty tensor instead of `None`` to force Dynamo to pass it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as a placeholder (it has wide hardware support).
         kv_caches = [torch.tensor([], dtype=torch.float32, device=self.device) for _ in range(num_layers)]
-        finished_requests_ids = [seq.request_id for seq in seqs]
+        finished_requests_ids = [seq.llm_seq_group_metadata.request_id for seq in seqs]
         model_input = self.prepare_model_input(seqs, finished_requests_ids=finished_requests_ids, is_prompt=True)
         intermediate_tensors = None
         self.execute_model(model_input, kv_caches, intermediate_tensors)
@@ -461,7 +463,7 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: List[AvatarSequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
         is_prompt=None,
@@ -476,28 +478,11 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
         llm_seqs = []
         tts_seqs = []
-        for seq in seq_group_metadata_list:
-            llm_seq = SequenceGroupMetadata(
-                request_id=seq.request_id,
-                is_prompt=seq.is_prompt,
-                seq_data={seq.request_id: seq.encoder_seq_data},
-                sampling_params=seq.sampling_params,
-                block_tables=None,
-                multi_modal_data=seq.multi_modal_data,
-                multi_modal_placeholders=seq.multi_modal_placeholders
-            )
-            tts_seq = SequenceGroupMetadata(
-                request_id=seq.request_id,
-                is_prompt=seq.is_prompt,
-                seq_data=seq.seq_data,
-                sampling_params=seq.sampling_params,
-                block_tables=None,
-                multi_modal_data=None,
-                multi_modal_placeholders=None
-            )
-
-            llm_seqs.append(llm_seq)
-            tts_seqs.append(tts_seq)
+        for seq_group_metadata in seq_group_metadata_list:
+            llm_seq_group_metadata = seq_group_metadata.llm_seq_group_metadata
+            tts_seq_group_metadata = seq_group_metadata.tts_seq_group_metadata
+            llm_seqs.append(llm_seq_group_metadata)
+            tts_seqs.append(tts_seq_group_metadata)
 
         llm_model_input = self._prepare_model_input_tensors(llm_seqs, finished_requests_ids)
         llm_sampling_metadata = SamplingMetadata.prepare(
@@ -536,9 +521,6 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
             is_prompt=is_prompt,
             virtual_engine=virtual_engine
         )
-
-        # if len(seq_group_metadata_list[0].seq_data[list(seq_group_metadata_list[0].seq_data.keys())[0]].output_token_ids)>0:
-        #     import pdb; pdb.set_trace()
 
         return model_input
 

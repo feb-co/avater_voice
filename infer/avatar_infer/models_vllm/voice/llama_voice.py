@@ -26,7 +26,7 @@ from vllm.model_executor.models import llama, VllmModelForTextGeneration
 from .tts_adapter import TTSAdapter
 from avatar_infer.models_vllm.layers.sample import get_avatar_sampler
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
-from avatar_infer.generation.sequence import AvatarSequenceData, AvatarSamplerOutput
+from avatar_infer.dataclass.sequence import AvatarSequenceData, AvatarSamplerOutput
 
 
 
@@ -184,7 +184,9 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
         tts_next_tokens = self.tts_sampler(tts_logits, sampling_metadata)
         return AvatarSamplerOutput(
             llm_outputs=llm_next_tokens.outputs,
-            tts_outputs=tts_next_tokens.outputs
+            tts_outputs=tts_next_tokens.outputs,
+            model_forward_time=llm_next_tokens.model_forward_time,
+            model_execute_time=llm_next_tokens.model_execute_time
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:

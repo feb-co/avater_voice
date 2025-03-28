@@ -10,9 +10,13 @@ from vllm.utils import FlexibleArgumentParser
 from transformers.cache_utils import DynamicCache
 
 
-from avatar_infer.generation import AvatarLLM
+from avatar_infer.generation.patch import apply_patch
 from avatar_infer.models.patcher import patch_model
 from avatar_infer.cache_utils import AvatarCache
+
+apply_patch()
+
+from vllm import LLM
 
 
 
@@ -109,7 +113,7 @@ def main(args, chat_conversation):
     top_k = args.pop("top_k")
 
     # Create an LLM
-    avatar_generator = AvatarLLM(**args)
+    avatar_generator = LLM(**args)
 
     # Create sampling params object
     sampling_params = avatar_generator.get_default_sampling_params()

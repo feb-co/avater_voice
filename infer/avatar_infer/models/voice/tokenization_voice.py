@@ -249,6 +249,11 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
             )
 
         self.init_kwargs = copy.deepcopy(kwargs)
+        
+        if not hasattr(self, "_added_tokens_decoder"):
+            self._added_tokens_decoder = {}
+        self._added_tokens_decoder.update(kwargs.pop("added_tokens_decoder", {}))
+        self._added_tokens_encoder: Dict[str, int] = {k.content: v for v, k in self._added_tokens_decoder.items()}
 
         # var init
         self.device = device
@@ -735,3 +740,7 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
                 new_text_token_threshold += 1
 
         return new_text_token_threshold
+
+    def _convert_id_to_token(self, index):
+        token = self.text_tokenizer._convert_id_to_token(index)
+        return token

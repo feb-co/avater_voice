@@ -1,18 +1,26 @@
-from typing import Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Callable, List, Optional, Set, Tuple, Type, Union
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, SchedulerConfig
 from vllm.entrypoints.llm import LLM
 from vllm.worker.model_runner import GPUModelRunnerBase
 from vllm.worker.worker import Worker
+from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
+from vllm.core.scheduler import Scheduler
+from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
+from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import Counter
 
-from .avatar_llm_engine import AvatarLLMEngine
-from .avatar_model_runner import AvatarModelRunner
-from .avatar_cache_engine import AvatarCacheEngine, bind_kv_cache
+from ..worker.avatar_llm_engine import AvatarLLMEngine
+from ..worker.avatar_model_runner import AvatarModelRunner
+from ..worker.avatar_cache_engine import AvatarCacheEngine, bind_kv_cache
 
 
 # Save original init method
 original_worker_init = Worker.__init__
 original_init_cache_engine = Worker._init_cache_engine
+original_output_processor = SequenceGroupOutputProcessor.create_output_processor
 
 
 def custom_engine_class(self):
@@ -84,6 +92,42 @@ def custom_get_cache_block_size_bytes(self) -> int:
     )
 
 
+def custom_create_output_processor(
+    scheduler_config: SchedulerConfig,
+    detokenizer: Detokenizer,
+    scheduler: List[Scheduler],
+    seq_counter: Counter,
+    get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
+    stop_checker: "StopChecker",
+):
+    """Create an output processor.
+    This returns a single-step output processor if num_lookahead_slots is
+    zero, else returns a multi-step output processor.
+    """
+    if scheduler_config.num_lookahead_slots == 0:
+        # Importing here to avoid cycle.
+        from ..processor.avatar_step import AvatarStepOutputProcessor
+        return AvatarStepOutputProcessor(
+            scheduler_config,
+            detokenizer,
+            scheduler,
+            seq_counter,
+            stop_checker
+        )
+    else:
+        # Importing here to avoid cycle.
+        from vllm.engine.output_processor.multi_step import (
+            MultiStepOutputProcessor)
+        return MultiStepOutputProcessor(
+            detokenizer,
+            scheduler,
+            seq_counter,
+            get_tokenizer_for_seq,
+            stop_checker,
+        )
+
+
+
 def apply_patch() -> None:
     # Engine patch
     LLM.get_engine_class = custom_engine_class
@@ -92,3 +136,6 @@ def apply_patch() -> None:
     Worker.__init__ = custom_worker_init
     Worker._init_cache_engine = custom_init_cache_engine
     Worker.get_cache_block_size_bytes = custom_get_cache_block_size_bytes
+    
+    # Processor
+    SequenceGroupOutputProcessor.create_output_processor = custom_create_output_processor

@@ -7,8 +7,12 @@ from typing import Set, Tuple, Union
 import msgspec
 
 from vllm.sequence import (
+    Sequence,
+    SequenceGroup,
     SequenceStage,
+    SequenceStatus,
     SequenceDataDelta,
+    SequenceGroupMetadata,
     CompletionSequenceGroupOutput,
     PromptLogprobs,
     SequenceOutput
@@ -271,6 +275,70 @@ class AvatarSequenceData(msgspec.Struct, omit_defaults=True):
                 f"get_num_computed_tokens={self.get_num_computed_tokens()})")
 
 
+class AvatarSequence:
+    def __init__(
+        self,
+        llm_seq: Sequence,
+        tts_seq: Sequence,
+    ) -> None:
+        self.llm_seq = llm_seq
+        self.tts_seq = tts_seq
+
+    def is_prefill(self) -> bool:
+        return (self.tts_seq.data.stage == SequenceStage.PREFILL and self.llm_seq.data.stage == SequenceStage.PREFILL)
+
+
+class AvatarSequenceGroup:
+    def __init__(
+        self,
+        llm_seq_group: Optional[SequenceGroup] = None,
+        tts_seq_group: Optional[SequenceGroup] = None,
+    ) -> None:
+        self.llm_seq_group = llm_seq_group
+        self.tts_seq_group = tts_seq_group
+
+    @property
+    def lora_request(self):
+        return self.llm_seq_group.lora_request
+    
+    @property
+    def prompt_adapter_request(self):
+        return self.llm_seq_group.prompt_adapter_request
+    
+    @property
+    def pooled_data(self):
+        return None
+
+    def get_seqs(
+        self,
+        status: Optional[SequenceStatus] = None,
+    ) -> List[AvatarSequence]:
+        seqs = [AvatarSequence(llm_seq, tts_seq) for (llm_seq, tts_seq) in zip(self.llm_seq_group.seqs, self.tts_seq_group.seqs)]
+
+        if status is None:
+            return seqs
+
+        if self.tts_seq_group.is_single_seq and self.llm_seq_group.is_single_seq:
+            return seqs if self.tts_seq_group.first_seq.status == status and self.llm_seq_group.first_seq.status == status else []
+
+        return [AvatarSequence(llm_seq, tts_seq) for (llm_seq, tts_seq) in zip(self.llm_seq_group.seqs, self.tts_seq_group.seqs) if (tts_seq.status == status and llm_seq.status == status)]
+
+    def is_prefill(self) -> bool:
+        return self.llm_seq_group.is_prefill()
+    
+    def is_finished(self) -> bool:
+        return self.llm_seq_group.is_finished() and self.tts_seq_group.is_finished()
+
+
+class AvatarSequenceGroupMetadata(
+        msgspec.Struct,
+        tag=True,  # type: ignore[call-arg]
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True):  # type: ignore[call-arg]
+    llm_seq_group_metadata: SequenceGroupMetadata
+    tts_seq_group_metadata: SequenceGroupMetadata
+
+
 class AvatarCompletionSequenceGroupOutput(CompletionSequenceGroupOutput):
     """
     A wrapper that extends CompletionSequenceGroupOutput with additional TTS data.
@@ -320,6 +388,8 @@ class AvatarSamplerOutput(msgspec.Struct, omit_defaults=True, array_like=True):
     sampled_token_probs = None
     sampled_token_ids = None
     spec_decode_worker_metrics = None
+    model_forward_time: Optional[float] = None
+    model_execute_time: Optional[float] = None
 
     def __getitem__(self, idx: int) -> CompletionSequenceGroupOutput:
         """Returns a CompletionSequenceGroupOutput-compatible wrapper at the specified index"""

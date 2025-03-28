@@ -818,7 +818,6 @@ def _random_sample(
             next_token_ids = random_samples[sample_idx:sample_idx+1, :, 0].tolist()
         else:
             # Generation phase.
-            import pdb; pdb.set_trace()
             parent_ids = list(range(num_parent_seqs))
             next_token_ids = random_samples[sample_idx:sample_idx+num_parent_seqs, :, 0].tolist()
 
