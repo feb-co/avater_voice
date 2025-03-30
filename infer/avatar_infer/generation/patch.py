@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Set, Tuple, Type, Union
+from typing import Callable, List, Optional, Type
 
 from vllm.config import VllmConfig, SchedulerConfig
 from vllm.entrypoints.llm import LLM
@@ -7,7 +7,7 @@ from vllm.worker.worker import Worker
 from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.stop_checker import StopChecker
-from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
+from vllm.sequence import Sequence
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
@@ -136,6 +136,6 @@ def apply_patch() -> None:
     Worker.__init__ = custom_worker_init
     Worker._init_cache_engine = custom_init_cache_engine
     Worker.get_cache_block_size_bytes = custom_get_cache_block_size_bytes
-    
+
     # Processor
     SequenceGroupOutputProcessor.create_output_processor = custom_create_output_processor

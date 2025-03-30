@@ -4,16 +4,10 @@ from typing import (Union, List, Mapping, Optional)
 from vllm.engine.llm_engine import LLMEngine, SchedulerContext, SchedulerOutputState
 from vllm.core.scheduler import ScheduledSequenceGroup
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.outputs import RequestOutputFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.inputs import ProcessorInputs
-from vllm.outputs import (
-    PoolingRequestOutput,
-    RequestOutput,
-    RequestOutputFactory
-)
 from vllm.sequence import (
     ExecuteModelRequest,
     Sequence,
@@ -26,9 +20,15 @@ from vllm.sequence import (
 
 
 from avatar_infer.dataclass.sequence import (
+    TTSSequence,
     AvatarSequenceGroup,
     AvatarSamplerOutput,
     AvatarSequenceGroupMetadata,
+)
+from avatar_infer.dataclass.outputs import (
+    PoolingRequestOutput,
+    AvatarRequestOutput,
+    AvatarRequestOutputFactory
 )
 
 
@@ -79,7 +79,7 @@ class AvatarLLMEngine(LLMEngine):
         llm_inputs = processed_inputs["encoder"]
         tts_inputs = processed_inputs["decoder"]
         llm_seq = Sequence(seq_id, llm_inputs, block_size, eos_token_id, lora_request, prompt_adapter_request)
-        tts_seq = Sequence(seq_id, tts_inputs, block_size, eoa_token_id, lora_request, prompt_adapter_request)
+        tts_seq = TTSSequence(seq_id, tts_inputs, block_size, eoa_token_id, lora_request, prompt_adapter_request)
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         llm_seq_group = self._create_sequence_group_with_sampling(
@@ -104,7 +104,7 @@ class AvatarLLMEngine(LLMEngine):
             encoder_seq=None,
             priority=priority
         )
-        
+
         avatar_seq_group = AvatarSequenceGroup(
             llm_seq_group=llm_seq_group,
             tts_seq_group=tts_seq_group,
@@ -257,7 +257,7 @@ class AvatarLLMEngine(LLMEngine):
                 seq_group.tts_seq_group.set_last_token_time(now)
 
             # Create request output
-            request_output = RequestOutputFactory.create(
+            request_output = AvatarRequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs
@@ -298,7 +298,7 @@ class AvatarLLMEngine(LLMEngine):
                 seq_group.tts_seq_group.set_last_token_time(now)
 
             # Create request output
-            request_output = RequestOutputFactory.create(
+            request_output = AvatarRequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
@@ -313,7 +313,7 @@ class AvatarLLMEngine(LLMEngine):
             if params is not None and params.output_kind == (RequestOutputKind.DELTA) and not seq_group.is_finished():
                 continue
 
-            request_output = RequestOutputFactory.create(
+            request_output = AvatarRequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs,
@@ -386,19 +386,15 @@ class AvatarLLMEngine(LLMEngine):
                 tts_seq.data.update_num_computed_tokens(
                     tts_seq.data.get_len()
                     if seq_group_metadata.llm_seq_group_metadata.is_prompt
-                    else 8
+                    else 1
                 )
 
                 # Append new tokens to sequences
                 # First append LLM token with its logprobs
                 llm_seq.append_token_id(llm_sample.output_token, llm_sample.logprobs)
+                tts_seq.append_token_id(tts_sample.output_token, {tts_sample.output_token: llm_sample.logprobs[llm_sample.output_token]})
 
-                # Then append TTS tokens, using LLM token probability for each TTS token
-                for tts_token in tts_sample.output_token:
-                    tts_probs = {tts_token: llm_sample.logprobs[llm_sample.output_token]}
-                    tts_seq.append_token_id(tts_token, tts_probs)
-
-    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    def step(self) -> List[Union[AvatarRequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png

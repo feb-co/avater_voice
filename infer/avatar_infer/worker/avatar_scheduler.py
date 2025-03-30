@@ -187,7 +187,7 @@ class AvatarScheduler(Scheduler):
                     block_tables=tts_block_tables,
                     do_sample=do_sample,
                     pooling_params=seq_group.tts_seq_group.pooling_params,
-                    token_chunk_size=8,
+                    token_chunk_size=1,
                     lora_request=seq_group.lora_request,
                     computed_block_nums=tts_common_computed_block_nums,
                     encoder_seq_data=tts_encoder_seq_data,
@@ -219,7 +219,7 @@ class AvatarScheduler(Scheduler):
                     tts_block_tables,
                     is_prompt,
                     do_sample=do_sample,
-                    token_chunk_size=8,
+                    token_chunk_size=1,
                     computed_block_nums=tts_common_computed_block_nums,
                 )
 
@@ -244,7 +244,7 @@ class AvatarScheduler(Scheduler):
             )
             self.tts_block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group.tts_seq_group,
-                8
+                1
             )
 
         self._seq_group_metadata_cache[self.next_cache_id].reset()

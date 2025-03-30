@@ -1,4 +1,3 @@
-"""Inference-only LLaMA Voice model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union, Mapping
 
 import torch
@@ -26,11 +25,11 @@ from vllm.model_executor.models import llama, VllmModelForTextGeneration
 from .tts_adapter import TTSAdapter
 from avatar_infer.models_vllm.layers.sample import get_avatar_sampler
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
-from avatar_infer.dataclass.sequence import AvatarSequenceData, AvatarSamplerOutput
+from avatar_infer.dataclass.sequence import TTSSequenceData, AvatarSamplerOutput
+from avatar_infer.utils import tts_codes_to_token
 
 
-
-def dummy_decoder_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
+def dummy_tts_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
     avatar_config: AvatarVoiceConfig = ctx.model_config.hf_config
     # tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
@@ -59,20 +58,24 @@ def dummy_decoder_data_for_llama_voice(ctx: InputContext, seq_len: int, mm_count
     #                                    item_size=image_feature_size)
     # }
 
-    seq_data = AvatarSequenceData.from_prompt_token_counts(avatar_config.code_layers, (0, seq_len))
+    seq_data = TTSSequenceData.from_prompt_token_counts((0, seq_len))
     return DummyData(seq_data)
 
 
 def input_processor_for_llama_voice(ctx: InputContext, inputs, **mm_processor_kwargs):
     avatar_config: AvatarVoiceConfig = ctx.model_config.hf_config
+    
+    boa_tokens = [avatar_config.boa_token_id] * avatar_config.code_layers
 
     deocder = token_inputs(
-        prompt_token_ids=[avatar_config.boa_token_id] * avatar_config.code_layers
+        prompt_token_ids=[tts_codes_to_token(
+            boa_tokens,
+        )]
     )
     return EncoderDecoderInputs(encoder=inputs, decoder=deocder)
 
 
-@INPUT_REGISTRY.register_dummy_data(dummy_decoder_data_for_llama_voice)
+@INPUT_REGISTRY.register_dummy_data(dummy_tts_data_for_llama_voice)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llama_voice)
 class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

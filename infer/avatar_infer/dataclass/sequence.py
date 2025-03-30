@@ -6,7 +6,11 @@ from typing import Set, Tuple, Union
 
 import msgspec
 
+from vllm.lora.request import LoRARequest
+from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.inputs import SingletonInputs, SingletonInputsAdapter
 from vllm.sequence import (
+    SequenceData,
     Sequence,
     SequenceGroup,
     SequenceStage,
@@ -14,26 +18,13 @@ from vllm.sequence import (
     SequenceDataDelta,
     SequenceGroupMetadata,
     CompletionSequenceGroupOutput,
+    SequenceOutput,
     PromptLogprobs,
-    SequenceOutput
+    SampleLogprobs,
 )
 
 
-TOKEN_ID_ARRAY_TYPE = "l"
-
-VLLM_INVALID_TOKEN_ID = -1
-
-
-def array_full_2d(token_id: int, count: int, code_layers: int):
-    """:class:`array` equivalent of :func:`numpy.full`."""
-    # 创建一个[count, code_layers]维度的array,每个元素都是token_id
-    result = []
-    for _ in range(count):
-        result.extend([token_id] * code_layers)
-    return array(TOKEN_ID_ARRAY_TYPE, result)
-
-
-class AvatarSequenceData(msgspec.Struct, omit_defaults=True):
+class TTSSequenceData(SequenceData):
     """Data associated with a sequence.
 
     Args:
@@ -48,8 +39,8 @@ class AvatarSequenceData(msgspec.Struct, omit_defaults=True):
     """
     # NOTE: we cannot use Union[List, array] because msgspec cannot support
     # union of 2 list types.
-    _prompt_token_ids: array
-    _output_token_ids: array = msgspec.field(default_factory=lambda: array(TOKEN_ID_ARRAY_TYPE, []))
+    _prompt_token_ids: List
+    _output_token_ids: List[int] = msgspec.field(default_factory=list)
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -69,210 +60,81 @@ class AvatarSequenceData(msgspec.Struct, omit_defaults=True):
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_prompt_token_counts(code_layers: int, *token_counts: Tuple[int, int]) -> "AvatarSequenceData":
+    def from_prompt_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
         """
-        Construct a :class:`AvatarSequenceData` instance by concatenating
+        Construct a :class:`SequenceData` instance by concatenating
         prompt token sequences.
 
         Each tuple represents one token sequence, expressed in the form
         :code:`(token_id, count)`.
         """
         if len(token_counts) == 0:
-            return AvatarSequenceData.from_seqs([])
+            return SequenceData.from_seqs([])
 
-        prompt_token_ids_arr = reduce(
-            array.__iadd__,
-            (array_full_2d(token_id, count, code_layers) for token_id, count in token_counts),
-        )
+        prompt_token_ids_arr = []
+        for token_id, count in token_counts:
+            prompt_token_ids_arr.extend([token_id] * count)
 
-        return AvatarSequenceData(prompt_token_ids_arr)
+        return TTSSequenceData(prompt_token_ids_arr)
 
     @staticmethod
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
-    ) -> "AvatarSequenceData":
+    ) -> "TTSSequenceData":
         """
-        Construct a :class:`AvatarSequenceData` instance from prompt and output
+        Construct a :class:`SequenceData` instance from prompt and output
         token sequences.
         """
-        prompt_token_ids_arr = array(TOKEN_ID_ARRAY_TYPE,
-                                     prompt_token_ids)
-
         if output_token_ids is None:
-            return AvatarSequenceData(prompt_token_ids_arr)
+            return TTSSequenceData(prompt_token_ids)
 
-        output_token_ids_arr = array(TOKEN_ID_ARRAY_TYPE,
-                                     output_token_ids)
-
-        return AvatarSequenceData(prompt_token_ids_arr,
-                            _output_token_ids=output_token_ids_arr)
+        return TTSSequenceData(
+            prompt_token_ids,
+            _output_token_ids=output_token_ids
+        )
 
     def __post_init__(self) -> None:
-        assert self._prompt_token_ids.typecode == "l"
-        assert self._output_token_ids.typecode == "l"
-        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
-            self._prompt_token_ids)
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(self._prompt_token_ids)
         self._update_cached_all_tokens()
 
     def _update_cached_all_tokens(self):
-        assert isinstance(self._prompt_token_ids, array)
-        assert isinstance(self._output_token_ids, array)
-        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
-                                                     self._output_token_ids)
+        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids + self._output_token_ids)
 
-    @property
-    def cumulative_logprob(self) -> float:
-        return self._cumulative_logprob
 
-    @property
-    def prompt_token_ids(self) -> Tuple[int, ...]:
-        return self._prompt_token_ids_tuple
+class TTSSequence(Sequence):
+    def __init__(
+        self,
+        seq_id: int,
+        inputs: SingletonInputs,
+        block_size: int,
+        eos_token_id: Optional[int] = None,
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> None:
+        self.seq_id = seq_id
+        self.inputs = SingletonInputsAdapter(inputs)
+        self.block_size = block_size
+        self.eos_token_id = eos_token_id
+        self.lora_request = lora_request
+        self.prompt_adapter_request = prompt_adapter_request
 
-    @prompt_token_ids.setter
-    def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        raise NotImplementedError
+        self.data = TTSSequenceData.from_seqs(self.prompt_token_ids)
+        self.output_logprobs: SampleLogprobs = []
+        self.output_text = ""
 
-    @property
-    def prompt_token_ids_array(self) -> array:
-        """Return the prompt token ids in array type.
+        self.status = SequenceStatus.WAITING
+        self.stop_reason: Union[int, str, None] = None
 
-        Note that the array is in "I" type, and it is not compatible
-        with torch.long (2 bytes vs 4 bytes). So beware of the usage.
-        """
-        return self._prompt_token_ids
+        # These are used to keep track of delta outputs
+        self._last_output_token_ids_offset: int = 0
+        self._last_output_text_offset: int = 0
 
-    @property
-    def output_token_ids(self) -> Tuple[int, ...]:
-        return tuple(self._output_token_ids)
-
-    @output_token_ids.setter
-    def output_token_ids(self,
-                         new_output_token_ids: GenericSequence[int]) -> None:
-        self._output_token_ids = array(TOKEN_ID_ARRAY_TYPE,
-                                       new_output_token_ids)
-        self._update_cached_all_tokens()
-
-    @property
-    def output_token_ids_array(self) -> array:
-        """Return the prompt token ids in array type.
-
-        Note that the array is in "I" type, and it is not compatible
-        with torch.long (2 bytes vs 4 bytes). So beware of the usage.
-        """
-        assert isinstance(self._output_token_ids, array)
-        return self._output_token_ids
-
-    @property
-    def mrope_position_delta(self) -> Optional[int]:
-        return self._mrope_position_delta
-
-    @mrope_position_delta.setter
-    def mrope_position_delta(self, new_mrope_position_delta):
-        self._mrope_position_delta = new_mrope_position_delta
-
-    def append_token_id(self, token_id: int, logprob: float) -> None:
-        self._output_token_ids.append(token_id)
-        self._new_appended_tokens.append(token_id)
-        self._cached_all_token_ids.append(token_id)
-        self._cumulative_logprob += logprob
-
-    def get_len(self) -> int:
-        return len(self._output_token_ids) + len(self._prompt_token_ids)
-
-    def get_prompt_len(self) -> int:
-        return len(self._prompt_token_ids)
-
-    def get_output_len(self) -> int:
-        return len(self._output_token_ids)
-
-    def get_token_ids(self) -> List[int]:
-        return self._cached_all_token_ids
-
-    def get_prefix_token_ids(
-            self, num_tokens: int
-    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
-        """Get prefix tokens, and make the return value hashable"""
-        prompt_length = self.get_prompt_len()
-        if num_tokens > prompt_length:
-            return (self._prompt_token_ids_tuple,
-                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
-        else:
-            return (self._prompt_token_ids_tuple[:num_tokens], None)
-
-    def get_num_computed_tokens(self) -> int:
-        """Return the number of prefill tokens that are already computed."""
-        return self._num_computed_tokens
-
-    def update_num_computed_tokens(self, num_new_computed_tokens: int):
-        """Update number of tokens computed so far."""
-        self._num_computed_tokens += num_new_computed_tokens
-        assert self._num_computed_tokens <= self.get_len(), (
-            self._num_computed_tokens, self.get_len())
-        # If all tokens are computed, it means it is in decoding phase.
-        if self.get_num_uncomputed_tokens() == 0:
-            self._stage = SequenceStage.DECODE
-
-    def get_num_cached_tokens(self) -> int:
-        """Return the number of tokens with prefix cache hit."""
-        return self._num_cached_tokens
-
-    def update_num_cached_tokens(self, num_cached_tokens: int):
-        """Update the number of tokens with prefix cache hit."""
-        self._num_cached_tokens = num_cached_tokens
-
-    def reset_state_for_recompute(self) -> None:
-        """Reset the number of computed tokens from this sequence. It is
-        supposed to be called when a sequence needs to be started from
-        the beginning again (e.g., sequence is preempted).
-        """
-        self._num_computed_tokens = 0
-        self._stage = SequenceStage.PREFILL
-        self._new_appended_tokens = []
-
-    def get_num_uncomputed_tokens(self) -> int:
-        """Return the number of prefill tokens that are not computed."""
-        # we use `get_len()` which includes prompt_len + output_len instead
-        # of prompt_len here. This is because during recompute we need to
-        # prefill for both prompt and output.
-        return self.get_len() - self.get_num_computed_tokens()
-
-    def get_last_token_id(self) -> int:
-        if not self._output_token_ids:
-            return self._prompt_token_ids[-1]
-        return self._output_token_ids[-1]
-
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
-        return self.prompt_token_ids
-
-    def get_output_token_ids(self) -> Tuple[int, ...]:
-        return self.output_token_ids
-
-    def get_delta_and_reset(self) -> SequenceDataDelta:
-        delta = SequenceDataDelta(self._new_appended_tokens,
-                                  self._cumulative_logprob,
-                                  self.get_num_computed_tokens(), self.stage)
-        # Reset delta state.
-        self._new_appended_tokens = []
-        return delta
-
-    def apply_delta(self, delta: SequenceDataDelta):
-        self._num_computed_tokens = delta.new_num_computed_tokens
-        self._cumulative_logprob = delta.new_cumulative_logprob
-        self._stage = delta.new_stage
-        self._output_token_ids.extend(delta.new_output_token_ids)
-        self._cached_all_token_ids.extend(delta.new_output_token_ids)
-
-    @property
-    def stage(self) -> SequenceStage:
-        return self._stage
-
-    def __repr__(self) -> str:
-        return (f"SequenceData("
-                f"prompt_token_ids={self._prompt_token_ids}, "
-                f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob}, "
-                f"get_num_computed_tokens={self.get_num_computed_tokens()})")
+        # Used for incremental detokenization
+        self.prefix_offset = 0
+        self.read_offset = 0
+        # Input + output tokens
+        self.tokens: Optional[List[str]] = None
 
 
 class AvatarSequence:
@@ -328,6 +190,30 @@ class AvatarSequenceGroup:
     
     def is_finished(self) -> bool:
         return self.llm_seq_group.is_finished() and self.tts_seq_group.is_finished()
+    
+    def get_last_token_latency(self) -> float:
+        """Returns the latency of the last token."""
+        assert not self.is_prefill(), (
+            "seq_group.get_last_token_latency() should not be called "
+            "if the seq_group is in prefill phase."
+        )
+        return max(
+            self.llm_seq_group.last_token_latency,
+            self.tts_seq_group.last_token_latency
+        )
+    
+    def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
+        # Optimization. We don't need to call get_seqs if we don't need to
+        # filter by states.
+        seqs = [AvatarSequence(llm_seq, tts_seq) for (llm_seq, tts_seq) in zip(self.llm_seq_group.seqs, self.tts_seq_group.seqs)]
+
+        if status is None:
+            return len(seqs)
+
+        if self.tts_seq_group.is_single_seq and self.llm_seq_group.is_single_seq:
+            return 1 if (seqs[0].llm_seq.status == status and seqs[0].tts_seq.status == status) else 0
+
+        return len(self.get_seqs(status))
 
 
 class AvatarSequenceGroupMetadata(

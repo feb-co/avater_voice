@@ -4,19 +4,18 @@ import torch
 import asyncio
 import soundfile as sf
 
-from vllm import EngineArgs
-from vllm.utils import FlexibleArgumentParser
-
 from transformers.cache_utils import DynamicCache
 
-
 from avatar_infer.generation.patch import apply_patch
-from avatar_infer.models.patcher import patch_model
-from avatar_infer.cache_utils import AvatarCache
 
 apply_patch()
 
+from avatar_infer.models.patcher import patch_model
+from avatar_infer.cache_utils import AvatarCache
+
 from vllm import LLM
+from vllm import EngineArgs
+from vllm.utils import FlexibleArgumentParser
 
 
 

@@ -141,9 +141,7 @@ class AvatarStepOutputProcessor(SequenceGroupOutputProcessor):
 
         if not is_async:
             llm_seq.append_token_id(llm_sample.output_token, llm_sample.logprobs)
-            for tts_token in tts_sample.output_token:
-                tts_probs = {tts_token: llm_sample.logprobs[llm_sample.output_token]}
-                tts_seq.append_token_id(tts_token, tts_probs)
+            tts_seq.append_token_id(tts_sample.output_token, {tts_sample.output_token: llm_sample.logprobs[llm_sample.output_token]})
 
         if llm_sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(llm_seq, llm_sampling_params)
