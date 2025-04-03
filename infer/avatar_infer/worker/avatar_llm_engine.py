@@ -1,13 +1,16 @@
 import time
-from typing import (Union, List, Mapping, Optional)
+from typing import Union, List, Mapping, Optional
+from collections import Counter as collectionsCounter
 
 from vllm.engine.llm_engine import LLMEngine, SchedulerContext, SchedulerOutputState
-from vllm.core.scheduler import ScheduledSequenceGroup
+from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.inputs import ProcessorInputs
+from vllm.utils import Device
 from vllm.sequence import (
     ExecuteModelRequest,
     Sequence,
@@ -18,11 +21,10 @@ from vllm.sequence import (
     ParallelSampleSequenceGroup
 )
 
-
+from avatar_infer.models_vllm.layers.sampler import AvatarSamplerOutput
 from avatar_infer.dataclass.sequence import (
     TTSSequence,
     AvatarSequenceGroup,
-    AvatarSamplerOutput,
     AvatarSequenceGroupMetadata,
 )
 from avatar_infer.dataclass.outputs import (
@@ -238,6 +240,7 @@ class AvatarLLMEngine(LLMEngine):
                 # Process probability logs and sampling results
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.llm_seq_group_metadata.do_sample:
+                    import pdb; pdb.set_trace()
                     self.output_processor.process_outputs(seq_group, output, is_async)
 
             # Check if the sequence group has finished after processing
@@ -394,6 +397,288 @@ class AvatarLLMEngine(LLMEngine):
                 llm_seq.append_token_id(llm_sample.output_token, llm_sample.logprobs)
                 tts_seq.append_token_id(tts_sample.output_token, {tts_sample.output_token: llm_sample.logprobs[llm_sample.output_token]})
 
+    def _get_stats(
+        self,
+        scheduler_outputs: Optional[SchedulerOutputs],
+        model_output: Optional[List[AvatarSamplerOutput]] = None,
+        finished_before: Optional[List[int]] = None,
+        skip: Optional[List[int]] = None
+    ) -> Stats:
+        """Get Stats to be Logged to Prometheus.
+
+        Args:
+            scheduler_outputs: Optional, used to populate metrics related to
+                the scheduled batch,
+            model_output: Optional, used to emit speculative decoding metrics
+                which are created by the workers.
+            finished_before: Optional, indices of sequences that were finished
+                before. These sequences will be ignored.
+            skip: Optional, indices of sequences that were preempted. These
+                sequences will be ignored.
+        """
+        now = time.time()
+
+        # System State
+        #   Scheduler State
+        num_running_sys = sum(len(scheduler.running) for scheduler in self.scheduler)
+        num_swapped_sys = sum(len(scheduler.swapped) for scheduler in self.scheduler)
+        num_waiting_sys = sum(len(scheduler.waiting) for scheduler in self.scheduler)
+
+        # KV Cache Usage in %
+        num_total_gpu = self.cache_config.num_gpu_blocks
+        gpu_cache_usage_sys = 0.
+        if num_total_gpu:  # Guard against both None and 0
+            llm_num_free_gpu = sum(
+                scheduler.block_manager.get_num_free_gpu_blocks()
+                for scheduler in self.scheduler
+            )
+            tts_num_free_gpu = sum(
+                scheduler.tts_block_manager.get_num_free_gpu_blocks()
+                for scheduler in self.scheduler
+            )
+            num_free_gpu = min(llm_num_free_gpu, tts_num_free_gpu)
+            gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
+
+        num_total_cpu = self.cache_config.num_cpu_blocks
+        cpu_cache_usage_sys = 0.
+        if num_total_cpu:  # Guard against both None and 0
+            llm_num_free_cpu = sum(
+                scheduler.block_manager.get_num_free_cpu_blocks()
+                for scheduler in self.scheduler
+            )
+            tts_num_free_cpu = sum(
+                scheduler.tts_block_manager.get_num_free_cpu_blocks()
+                for scheduler in self.scheduler
+            )
+            num_free_cpu = min(llm_num_free_cpu, tts_num_free_cpu)
+            cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
+
+        # Prefix Cache Hit Rate. Note that we always use the cache hit rate of the first virtual engine.
+        cpu_prefix_cache_hit_rate = self.scheduler[0].get_prefix_cache_hit_rate(Device.CPU)
+        gpu_prefix_cache_hit_rate = self.scheduler[0].get_prefix_cache_hit_rate(Device.GPU)
+
+        # Iteration stats
+        num_prompt_tokens_iter = 0
+        num_generation_tokens_iter = 0
+        num_tokens_iter = 0
+        time_to_first_tokens_iter: List[float] = []
+        time_per_output_tokens_iter: List[float] = []
+        num_preemption_iter = (
+            0 if scheduler_outputs is None 
+            else scheduler_outputs.preempted
+        )
+
+        # Request stats
+        #   Latency
+        time_e2e_requests: List[float] = []
+        time_queue_requests: List[float] = []
+        time_inference_requests: List[float] = []
+        time_prefill_requests: List[float] = []
+        time_decode_requests: List[float] = []
+        time_in_queue_requests: List[float] = []
+        model_forward_time_requests: List[float] = []
+        model_execute_time_requests: List[float] = []
+        #   Metadata
+        num_prompt_tokens_requests: List[int] = []
+        num_generation_tokens_requests: List[int] = []
+        n_requests: List[int] = []
+        max_num_generation_tokens_requests: List[int] = []
+        max_tokens_requests: List[int] = []
+        finished_reason_requests: List[str] = []
+
+        # Lora requests
+        running_lora_adapters = dict(
+            collectionsCounter([
+                running_request.lora_request.lora_name
+                for scheduler in self.scheduler
+                for running_request in scheduler.running
+                if running_request.lora_request
+            ])
+        )
+        waiting_lora_adapters = dict(
+            collectionsCounter([
+                waiting_request.lora_request.lora_name
+                for scheduler in self.scheduler
+                for waiting_request in scheduler.waiting
+                if waiting_request.lora_request
+            ])
+        )
+        max_lora_stat = "0"
+        if self.lora_config:
+            max_lora_stat = str(self.lora_config.max_loras)
+
+        # NOTE: This loop assumes prefill seq_groups are before decode seq_groups in scheduled_seq_groups.
+        if scheduler_outputs is not None:
+            # For async postprocessor, already finished sequences need to be
+            # not counted (to avoid double counting)
+            actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
+
+            num_generation_tokens_from_prefill_groups = 0
+            # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
+            # the len of scheduler_outputs.scheduled_seq_groups is !=
+            # scheduler_outputs.num_prefill_groups, this means that
+            # chunked prefills have been detected.
+
+            for idx, scheduled_seq_group in enumerate(scheduler_outputs.scheduled_seq_groups):
+                # Skip double logging when using async output proc
+                if finished_before and idx in finished_before:
+                    actual_num_batched_tokens -= 1
+                    continue
+
+                # Currently, skip == preempted sequences, so we need to skip
+                # their log stats
+                if skip and idx in skip:
+                    continue
+
+                group_was_prefill = idx < scheduler_outputs.num_prefill_groups
+                seq_group: AvatarSequenceGroup = scheduled_seq_group.seq_group
+
+                # NOTE: a seq_group that completed all of its prefill tokens
+                # in the last iteration will have seq_group.is_prefill() = False
+                # with group_was_prefill = True
+                if group_was_prefill:
+                    # Number of prompt tokens.
+                    num_prompt_tokens_iter += (scheduled_seq_group.token_chunk_size)
+
+                    # If the seq_group just finished the prefill state
+                    # get TTFT.
+                    if not seq_group.is_prefill():
+                        latency = seq_group.get_last_token_latency()
+                        time_to_first_tokens_iter.append(latency)
+
+                        # One generation token per finished prefill.
+                        num_generation_tokens_from_prefill_groups += seq_group.num_seqs()
+                else:
+                    # TPOTs.
+                    latency = seq_group.get_last_token_latency()
+                    time_per_output_tokens_iter.append(latency)
+                    if seq_group.llm_seq_group.state.current_step == 0:
+                        # For async_output_proc, the do_log_stats() is called following init_multi_step(), which sets the current_step to zero.
+                        actual_num_batched_tokens += max(
+                            seq_group.llm_seq_group.state.num_steps,
+                            seq_group.tts_seq_group.state.num_steps
+                        ) - 1
+                    else:
+                        actual_num_batched_tokens += max(
+                            seq_group.llm_seq_group.state.num_steps,
+                            seq_group.tts_seq_group.state.num_steps
+                        ) - 1
+
+                # Because of chunked prefill, we can have a single sequence
+                # group that does multiple prompt_runs. To prevent logging
+                # the same metadata more than once per request, we standardize
+                # on logging request level information for finished requests,
+                # which can only happen once.
+                if seq_group.is_finished():
+                    # Latency timings
+                    time_e2e_requests.append(now -
+                                             seq_group.metrics.arrival_time)
+                    if (seq_group.metrics.first_scheduled_time is not None and
+                            seq_group.metrics.first_token_time is not None):
+                        time_queue_requests.append(
+                            seq_group.metrics.first_scheduled_time -
+                            seq_group.metrics.arrival_time)
+                        time_prefill_requests.append(
+                            seq_group.metrics.first_token_time -
+                            seq_group.metrics.first_scheduled_time)
+                        time_decode_requests.append(
+                            now - seq_group.metrics.first_token_time)
+                        time_inference_requests.append(
+                            now - seq_group.metrics.first_scheduled_time)
+                    if seq_group.metrics.time_in_queue is not None:
+                        time_in_queue_requests.append(
+                            seq_group.metrics.time_in_queue)
+                    if seq_group.metrics.model_forward_time is not None:
+                        model_forward_time_requests.append(
+                            seq_group.metrics.model_forward_time)
+                    if seq_group.metrics.model_execute_time is not None:
+                        model_execute_time_requests.append(
+                            seq_group.metrics.model_execute_time * 1000)
+
+                    # Metadata
+                    num_prompt_tokens_requests.append(
+                        len(seq_group.prompt_token_ids))
+                    num_generation_tokens_requests.extend([
+                        seq.get_output_len()
+                        for seq in seq_group.get_finished_seqs()
+                    ])
+                    max_num_generation_tokens_requests.append(
+                        max(seq.get_output_len() for seq in seq_group.get_seqs())
+                    )
+                    if seq_group.sampling_params is not None:
+                        n_requests.append(seq_group.sampling_params.n)
+                        max_tokens_requests.append(seq_group.sampling_params.max_tokens)
+                    finished_reason_requests.extend([
+                        SequenceStatus.get_finished_reason(seq.status)
+                        for seq in seq_group.get_finished_seqs()
+                    ])
+
+            # Number of generation tokens.
+            #   num_batched_tokens equals the number of prompt_tokens plus the
+            #   number of decode_tokens in a single iteration. So,
+            #   num_generation_tokens = num_batched_tokens - num_prompt_tokens
+            #   + num_generation_tokens_from_prefill_groups (since we generate
+            #   one token on prefills on iters where the prefill finishes).
+            num_generation_tokens_iter = (
+                actual_num_batched_tokens
+                - num_prompt_tokens_iter
+                + num_generation_tokens_from_prefill_groups
+            )
+            num_tokens_iter = num_generation_tokens_iter + num_prompt_tokens_iter
+
+        # Spec decode, if enabled, emits specialized metrics from the worker in sampler output.
+        if model_output and isinstance(model_output[0], AvatarSamplerOutput) \
+            and (model_output[0].spec_decode_worker_metrics is not None):
+            spec_decode_metrics = model_output[0].spec_decode_worker_metrics
+        else:
+            spec_decode_metrics = None
+
+        return Stats(
+            now=now,
+            # System stats
+            #   Scheduler State
+            num_running_sys=num_running_sys,
+            num_swapped_sys=num_swapped_sys,
+            num_waiting_sys=num_waiting_sys,
+            #   KV Cache Usage in %
+            gpu_cache_usage_sys=gpu_cache_usage_sys,
+            cpu_cache_usage_sys=cpu_cache_usage_sys,
+            #   Prefix Cache Hit Rate
+            cpu_prefix_cache_hit_rate=cpu_prefix_cache_hit_rate,
+            gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
+
+            # Iteration stats
+            num_prompt_tokens_iter=num_prompt_tokens_iter,
+            num_generation_tokens_iter=num_generation_tokens_iter,
+            num_tokens_iter=num_tokens_iter,
+            time_to_first_tokens_iter=time_to_first_tokens_iter,
+            time_per_output_tokens_iter=time_per_output_tokens_iter,
+            spec_decode_metrics=spec_decode_metrics,
+            num_preemption_iter=num_preemption_iter,
+
+            # Request stats
+            #   Latency
+            time_e2e_requests=time_e2e_requests,
+            time_queue_requests=time_queue_requests,
+            time_inference_requests=time_inference_requests,
+            time_prefill_requests=time_prefill_requests,
+            time_decode_requests=time_decode_requests,
+            time_in_queue_requests=time_in_queue_requests,
+            model_forward_time_requests=model_forward_time_requests,
+            model_execute_time_requests=model_execute_time_requests,
+            #   Metadata
+            num_prompt_tokens_requests=num_prompt_tokens_requests,
+            num_generation_tokens_requests=num_generation_tokens_requests,
+            max_num_generation_tokens_requests=
+            max_num_generation_tokens_requests,
+            n_requests=n_requests,
+            max_tokens_requests=max_tokens_requests,
+            finished_reason_requests=finished_reason_requests,
+            max_lora=str(max_lora_stat),
+            waiting_lora_adapters=list(waiting_lora_adapters.keys()),
+            running_lora_adapters=list(running_lora_adapters.keys())
+        )
+
     def step(self) -> List[Union[AvatarRequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
@@ -516,14 +801,15 @@ class AvatarLLMEngine(LLMEngine):
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids
+            )
 
             if allow_async_output_proc:
-                execute_model_req.async_callback = self.async_callbacks[
-                    virtual_engine]
+                execute_model_req.async_callback = self.async_callbacks[virtual_engine]
 
             outputs = self.model_executor.execute_model(
-                execute_model_req=execute_model_req)
+                execute_model_req=execute_model_req
+            )
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
@@ -571,7 +857,8 @@ class AvatarLLMEngine(LLMEngine):
 
                 self._advance_to_next_step(
                     outputs[0], seq_group_metadata_list,
-                    scheduler_outputs.scheduled_seq_groups)
+                    scheduler_outputs.scheduled_seq_groups
+                )
 
             # Check if need to run the usual non-async path
             if not allow_async_output_proc:

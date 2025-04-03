@@ -1,10 +1,8 @@
-from array import array
+import msgspec
 from functools import reduce
 from typing import Any, Callable, Iterator, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
-
-import msgspec
 
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -60,16 +58,16 @@ class TTSSequenceData(SequenceData):
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_prompt_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+    def from_prompt_token_counts(*token_counts: Tuple[int, int]) -> "TTSSequenceData":
         """
-        Construct a :class:`SequenceData` instance by concatenating
+        Construct a :class:`TTSSequenceData` instance by concatenating
         prompt token sequences.
 
         Each tuple represents one token sequence, expressed in the form
         :code:`(token_id, count)`.
         """
         if len(token_counts) == 0:
-            return SequenceData.from_seqs([])
+            return TTSSequenceData.from_seqs([])
 
         prompt_token_ids_arr = []
         for token_id, count in token_counts:
@@ -83,7 +81,7 @@ class TTSSequenceData(SequenceData):
         output_token_ids: Optional[GenericSequence[int]] = None,
     ) -> "TTSSequenceData":
         """
-        Construct a :class:`SequenceData` instance from prompt and output
+        Construct a :class:`TTSSequenceData` instance from prompt and output
         token sequences.
         """
         if output_token_ids is None:
@@ -100,6 +98,24 @@ class TTSSequenceData(SequenceData):
 
     def _update_cached_all_tokens(self):
         self._cached_all_token_ids: List[int] = list(self._prompt_token_ids + self._output_token_ids)
+    
+    @property
+    def prompt_token_ids(self) -> Tuple[int, ...]:
+        return self._prompt_token_ids_tuple
+
+    @prompt_token_ids.setter
+    def prompt_token_ids(self, new_prompt_token_ids) -> None:
+        self._prompt_token_ids = new_prompt_token_ids
+        self.__post_init__()
+
+    @property
+    def output_token_ids(self) -> Tuple[int, ...]:
+        return tuple(self._output_token_ids)
+
+    @output_token_ids.setter
+    def output_token_ids(self, new_output_token_ids: GenericSequence[int]) -> None:
+        self._output_token_ids = new_output_token_ids
+        self._update_cached_all_tokens()
 
 
 class TTSSequence(Sequence):
@@ -264,88 +280,3 @@ class AvatarCompletionSequenceGroupOutput(CompletionSequenceGroupOutput):
     def llm_prompt_logprobs(self):
         """Access LLM prompt logprobs directly (same as .prompt_logprobs)"""
         return self.prompt_logprobs
-
-
-class AvatarSamplerOutput(msgspec.Struct, omit_defaults=True, array_like=True):
-    llm_outputs: List[CompletionSequenceGroupOutput]
-    tts_outputs: List[CompletionSequenceGroupOutput]
-
-    # Preserve original SamplerOutput attributes
-    sampled_token_probs = None
-    sampled_token_ids = None
-    spec_decode_worker_metrics = None
-    model_forward_time: Optional[float] = None
-    model_execute_time: Optional[float] = None
-
-    def __getitem__(self, idx: int) -> CompletionSequenceGroupOutput:
-        """Returns a CompletionSequenceGroupOutput-compatible wrapper at the specified index"""
-        if idx >= len(self.llm_outputs) or idx >= len(self.tts_outputs):
-            raise IndexError(f"Index {idx} out of range")
-
-        return AvatarCompletionSequenceGroupOutput.from_outputs(
-            llm_output=self.llm_outputs[idx],
-            tts_output=self.tts_outputs[idx]
-        )
-
-    def __setitem__(
-        self,
-        idx: int,
-        value: Union[CompletionSequenceGroupOutput, Tuple[CompletionSequenceGroupOutput, CompletionSequenceGroupOutput]]
-    ):
-        """Sets outputs at the specified index"""
-        if isinstance(value, AvatarCompletionSequenceGroupOutput):
-            # Handle our wrapper class
-            self.llm_outputs[idx] = CompletionSequenceGroupOutput(
-                samples=value.samples,
-                prompt_logprobs=value.prompt_logprobs
-            )
-            self.tts_outputs[idx] = CompletionSequenceGroupOutput(
-                samples=value.tts_samples,
-                prompt_logprobs=value.tts_prompt_logprobs
-            )
-        elif isinstance(value, tuple) and len(value) == 2:
-            # Handle tuple of (llm, tts)
-            self.llm_outputs[idx] = value[0]
-            self.tts_outputs[idx] = value[1]
-        elif isinstance(value, CompletionSequenceGroupOutput):
-            # Handle standard CompletionSequenceGroupOutput
-            self.llm_outputs[idx] = value
-            # Create a placeholder TTS output if needed
-            if idx >= len(self.tts_outputs):
-                self.tts_outputs.append(CompletionSequenceGroupOutput(
-                    samples=[],
-                    prompt_logprobs=None
-                ))
-        else:
-            raise ValueError("Value must be a CompletionSequenceGroupOutput or a tuple of (llm_output, tts_output)")
-
-    def __iter__(self) -> Iterator[CompletionSequenceGroupOutput]:
-        """Returns an iterator that yields wrapped CompletionSequenceGroupOutput objects"""
-        for i in range(len(self)):
-            yield self.__getitem__(i)
-
-    def __len__(self):
-        """Returns the number of output pairs, which is the minimum length of both output lists"""
-        return min(len(self.llm_outputs), len(self.tts_outputs))
-
-    def __eq__(self, other: object):
-        """Compares if two AvatarSamplerOutput objects are equal"""
-        return (isinstance(other, self.__class__) and 
-                self.llm_outputs == other.llm_outputs and 
-                self.tts_outputs == other.tts_outputs)
-
-    def __repr__(self) -> str:
-        """Shows shapes of tensors instead of their values to reduce output noise"""
-        sampled_token_probs_repr = ("None" if self.sampled_token_probs is None
-                                   else getattr(self.sampled_token_probs, 'shape', str(self.sampled_token_probs)))
-        sampled_token_ids_repr = ("None" if self.sampled_token_ids is None 
-                                 else getattr(self.sampled_token_ids, 'shape', str(self.sampled_token_ids)))
-
-        return (
-            f"AvatarSamplerOutput("
-            f"llm_outputs={self.llm_outputs}, "
-            f"tts_outputs={self.tts_outputs}, "
-            f"sampled_token_probs={sampled_token_probs_repr}, "
-            f"sampled_token_ids={sampled_token_ids_repr}, "
-            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})"
-        )

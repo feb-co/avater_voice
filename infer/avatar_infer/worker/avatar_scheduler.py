@@ -22,9 +22,15 @@ from vllm.core.scheduler import (
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStage, SequenceStatus)
+from vllm.sequence import (
+    Sequence,
+    SequenceData,
+    SequenceGroup,
+    SequenceGroupMetadata,
+    SequenceGroupMetadataDelta,
+    SequenceStage,
+    SequenceStatus
+)
 from vllm.utils import Device, PyObjectCache
 
 
@@ -329,7 +335,7 @@ class AvatarScheduler(Scheduler):
                 leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
-            
+
             llm_num_new_tokens_uncached, llm_num_new_tokens_cached = (
                 self._get_num_new_uncached_and_cached_tokens(
                     seq_group.llm_seq_group,
@@ -719,8 +725,10 @@ class AvatarScheduler(Scheduler):
 
                 # Do preemption
                 if do_preempt:
-                    preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out)
+                    preempted_mode = self._preempt(
+                        victim_seq_group,
+                        blocks_to_swap_out
+                    )
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:

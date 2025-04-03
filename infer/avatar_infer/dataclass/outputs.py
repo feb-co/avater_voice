@@ -24,7 +24,6 @@ from vllm.sequence import (
 
 from avatar_infer.dataclass.sequence import (
     AvatarSequenceGroup,
-    AvatarSamplerOutput,
     AvatarSequenceGroupMetadata,
 )
 

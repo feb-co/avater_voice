@@ -266,6 +266,7 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
         # text tokenizer init
         self.text_tokenizer = AutoTokenizer.from_pretrained(TEXT_TOKENIZER_PATH)
         self.bos_token = self.text_tokenizer.bos_token
+        self.eos_token = self.text_tokenizer.eos_token
         self.eos_token_id = self.text_tokenizer.eos_token_id
         self.total_vocab_size = len(self.get_vocab())
 
@@ -419,7 +420,7 @@ class AvatarVoiceTokenizer(PreTrainedTokenizer):
             "device": self.device,
             "chat_template": self.chat_template,
             "bos_token": self.bos_token,
-            "eos_token_id": self.eos_token_id
+            "eos_token": self.eos_token
         })
 
         if getattr(self, "audio_special_token", None):

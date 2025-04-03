@@ -17,15 +17,19 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.sampler import get_sampler
+from vllm.model_executor.layers.sampler import get_sampler, SamplerOutput
 from vllm.sequence import IntermediateTensors
 
 from vllm.model_executor.models import llama, VllmModelForTextGeneration
 
 from .tts_adapter import TTSAdapter
-from avatar_infer.models_vllm.layers.sample import get_avatar_sampler
+from avatar_infer.models_vllm.layers.sampler import (
+    TTSMultiTokenSamplerOutput,
+    AvatarSamplerOutput,
+    get_tts_sampler,
+)
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
-from avatar_infer.dataclass.sequence import TTSSequenceData, AvatarSamplerOutput
+from avatar_infer.dataclass.sequence import TTSSequenceData
 from avatar_infer.utils import tts_codes_to_token
 
 
@@ -98,7 +102,7 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
 
         # sample param
         self.llm_sampler = get_sampler()
-        self.tts_sampler = get_avatar_sampler()
+        self.tts_sampler = get_tts_sampler()
         if get_pp_group().is_last_rank:
             self.llm_logits_processor = LogitsProcessor(
                 self.llm.unpadded_vocab_size,
@@ -183,8 +187,11 @@ class LlamaVoiceForCausalLM(nn.Module, VllmModelForTextGeneration):
     ) -> Optional[AvatarSamplerOutput]:
         llm_logits = logits["llm_logits"]
         tts_logits = logits["tts_logits"]
-        llm_next_tokens = self.llm_sampler(llm_logits, encoder_sampling_metadata)
-        tts_next_tokens = self.tts_sampler(tts_logits, sampling_metadata)
+        llm_next_tokens: SamplerOutput = self.llm_sampler(llm_logits, encoder_sampling_metadata)
+        tts_next_tokens: TTSMultiTokenSamplerOutput = self.tts_sampler(tts_logits, sampling_metadata)
+        for seq_output in tts_next_tokens.outputs:
+            for sample in seq_output.samples:
+                sample.output_token = tts_codes_to_token(sample.output_token)
         return AvatarSamplerOutput(
             llm_outputs=llm_next_tokens.outputs,
             tts_outputs=tts_next_tokens.outputs,

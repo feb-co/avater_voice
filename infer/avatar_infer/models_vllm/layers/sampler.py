@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-"""A layer that samples the next tokens from the model's outputs."""
 import itertools
 import warnings
 from dataclasses import dataclass
@@ -23,10 +21,14 @@ from vllm.sequence import (
     VLLM_INVALID_TOKEN_ID,
     CompletionSequenceGroupOutput,
     Logprob,
-    PromptLogprobs, SampleLogprobs,
+    PromptLogprobs,
+    SampleLogprobs,
     SequenceOutput
 )
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+
+
+from avatar_infer.dataclass.sequence import AvatarCompletionSequenceGroupOutput
 
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
@@ -39,8 +41,8 @@ else:
     flashinfer_top_k_top_p_sampling = None
 
 
-def get_avatar_sampler() -> torch.nn.Module:
-    return AvatarMultiTokenSampler()
+def get_tts_sampler() -> torch.nn.Module:
+    return TTSMultiTokenSampler()
 
 
 # (num_token_ids, num_parent_ids) per sequence group.
@@ -81,7 +83,92 @@ MaybeDeferredSampleResultType = Union[SampleResultType, SampleResultArgsType]
 SampleReturnType = Tuple[MaybeDeferredSampleResultType, Optional[torch.Tensor]]
 
 
-class AvatarMultiTokenSamplerOutput(
+class AvatarSamplerOutput(msgspec.Struct, omit_defaults=True, array_like=True):
+    llm_outputs: List[CompletionSequenceGroupOutput]
+    tts_outputs: List[CompletionSequenceGroupOutput]
+
+    # Preserve original SamplerOutput attributes
+    sampled_token_probs = None
+    sampled_token_ids = None
+    spec_decode_worker_metrics = None
+    model_forward_time: Optional[float] = None
+    model_execute_time: Optional[float] = None
+
+    def __getitem__(self, idx: int) -> AvatarCompletionSequenceGroupOutput:
+        """Returns a CompletionSequenceGroupOutput-compatible wrapper at the specified index"""
+        if idx >= len(self.llm_outputs) or idx >= len(self.tts_outputs):
+            raise IndexError(f"Index {idx} out of range")
+
+        return AvatarCompletionSequenceGroupOutput.from_outputs(
+            llm_output=self.llm_outputs[idx],
+            tts_output=self.tts_outputs[idx]
+        )
+
+    def __setitem__(
+        self,
+        idx: int,
+        value: Union[CompletionSequenceGroupOutput, Tuple[CompletionSequenceGroupOutput, CompletionSequenceGroupOutput]]
+    ):
+        """Sets outputs at the specified index"""
+        if isinstance(value, AvatarCompletionSequenceGroupOutput):
+            # Handle our wrapper class
+            self.llm_outputs[idx] = CompletionSequenceGroupOutput(
+                samples=value.samples,
+                prompt_logprobs=value.prompt_logprobs
+            )
+            self.tts_outputs[idx] = CompletionSequenceGroupOutput(
+                samples=value.tts_samples,
+                prompt_logprobs=value.tts_prompt_logprobs
+            )
+        elif isinstance(value, tuple) and len(value) == 2:
+            # Handle tuple of (llm, tts)
+            self.llm_outputs[idx] = value[0]
+            self.tts_outputs[idx] = value[1]
+        elif isinstance(value, CompletionSequenceGroupOutput):
+            # Handle standard CompletionSequenceGroupOutput
+            self.llm_outputs[idx] = value
+            # Create a placeholder TTS output if needed
+            if idx >= len(self.tts_outputs):
+                self.tts_outputs.append(CompletionSequenceGroupOutput(
+                    samples=[],
+                    prompt_logprobs=None
+                ))
+        else:
+            raise ValueError("Value must be a CompletionSequenceGroupOutput or a tuple of (llm_output, tts_output)")
+
+    def __iter__(self) -> Iterator[CompletionSequenceGroupOutput]:
+        """Returns an iterator that yields wrapped CompletionSequenceGroupOutput objects"""
+        for i in range(len(self)):
+            yield self.__getitem__(i)
+
+    def __len__(self):
+        """Returns the number of output pairs, which is the minimum length of both output lists"""
+        return min(len(self.llm_outputs), len(self.tts_outputs))
+
+    def __eq__(self, other: object):
+        """Compares if two AvatarSamplerOutput objects are equal"""
+        return (isinstance(other, self.__class__) and 
+                self.llm_outputs == other.llm_outputs and 
+                self.tts_outputs == other.tts_outputs)
+
+    def __repr__(self) -> str:
+        """Shows shapes of tensors instead of their values to reduce output noise"""
+        sampled_token_probs_repr = ("None" if self.sampled_token_probs is None
+                                   else getattr(self.sampled_token_probs, 'shape', str(self.sampled_token_probs)))
+        sampled_token_ids_repr = ("None" if self.sampled_token_ids is None 
+                                 else getattr(self.sampled_token_ids, 'shape', str(self.sampled_token_ids)))
+
+        return (
+            f"AvatarSamplerOutput("
+            f"llm_outputs={self.llm_outputs}, "
+            f"tts_outputs={self.tts_outputs}, "
+            f"sampled_token_probs={sampled_token_probs_repr}, "
+            f"sampled_token_ids={sampled_token_ids_repr}, "
+            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})"
+        )
+
+
+class TTSMultiTokenSamplerOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
@@ -153,13 +240,13 @@ class AvatarMultiTokenSamplerOutput(
         sampled_token_ids_repr = ("None" if self.sampled_token_ids is None else
                                   self.sampled_token_ids.shape)
         return (
-            f"AvatarMultiTokenSamplerOutput(outputs={self.outputs}, "
+            f"TTSMultiTokenSamplerOutput(outputs={self.outputs}, "
             f"sampled_token_probs={sampled_token_probs_repr}, "
             f"sampled_token_ids={sampled_token_ids_repr}, "
             f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
 
 
-class AvatarMultiTokenSampler(nn.Module):
+class TTSMultiTokenSampler(nn.Module):
     """Samples the next tokens from the model's outputs.
 
     This layer does the following:
@@ -183,7 +270,7 @@ class AvatarMultiTokenSampler(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # Whether or not the AvatarMultiTokenSamplerOutput should have on-device tensors
+        # Whether or not the TTSMultiTokenSamplerOutput should have on-device tensors
         # containing the sampled token ids and probabilities. This is used by
         # speculative decoding.
         self.include_gpu_probs_tensor = False
@@ -224,7 +311,7 @@ class AvatarMultiTokenSampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[AvatarMultiTokenSamplerOutput]:
+    ) -> Optional[TTSMultiTokenSamplerOutput]:
         """
         Single-step scheduling:
         * Perform GPU-side sampling computation & compute
@@ -237,7 +324,7 @@ class AvatarMultiTokenSampler(nn.Module):
         * Defer Pythonization of sampling result & logprobs
           tensor
         * Encapsulate arguments required for deferred Pythonization
-          in the :class:`AvatarMultiTokenSamplerOutput` structure
+          in the :class:`TTSMultiTokenSamplerOutput` structure
 
         Args:
             logits: (num_tokens, vocab_size).
@@ -1216,7 +1303,7 @@ def build_sampler_output(
     sampling_metadata: SamplingMetadata,
     on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     skip_sampler_cpu_output: bool = False,
-) -> AvatarMultiTokenSamplerOutput:
+) -> TTSMultiTokenSamplerOutput:
     """Construct Python objects with the output of sampling.
 
     Args:
@@ -1251,13 +1338,13 @@ def build_sampler_output(
                 prompt_logprobs=None
             ))
 
-    # If not specified, store None values in AvatarMultiTokenSamplerOutput.
+    # If not specified, store None values in TTSMultiTokenSamplerOutput.
     if on_device_tensors is not None:
         sampled_token_probs, logprobs_tensor, sampled_token_ids = on_device_tensors
     else:
         sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None, None)
 
-    return AvatarMultiTokenSamplerOutput(
+    return TTSMultiTokenSamplerOutput(
         outputs=sampler_output,
         sampled_token_probs=sampled_token_probs,
         sampled_token_ids=sampled_token_ids,

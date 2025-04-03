@@ -2,6 +2,8 @@ import time
 import inspect
 import dataclasses
 import weakref
+import msgspec
+import copy
 from tqdm import tqdm
 from typing import Any, Dict, List, Optional, Tuple, Type, cast, Set
 
@@ -36,9 +38,10 @@ from .avatar_cache_engine import get_avatar_param
 from .forward_avatar_context import set_tts_forward_context
 from avatar_infer.models.voice.configuration_voice import AvatarVoiceConfig
 from avatar_infer.dataclass.sequence import (
-    AvatarSequenceGroup,
+    TTSSequenceData,
     AvatarSequenceGroupMetadata,
 )
+from avatar_infer.utils import token_to_tts_codes
 
 
 logger = init_logger(__name__)
@@ -333,14 +336,14 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in AvatarModelInput")
 
-        if (model_input.attn_metadata is not None and 
-            model_input.attn_metadata.prefill_metadata is None and
-            model_input.attn_metadata.decode_metadata.use_cuda_graph):
-            assert model_input.input_tokens is not None
-            graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = self.graph_runners[model_input.virtual_engine][graph_batch_size]
-        else:
-            model_executable = self.model
+        # if (model_input.attn_metadata is not None and 
+        #     model_input.attn_metadata.prefill_metadata is None and
+        #     model_input.attn_metadata.decode_metadata.use_cuda_graph):
+        #     assert model_input.input_tokens is not None
+        #     graph_batch_size = model_input.input_tokens.shape[0]
+        #     model_executable = self.graph_runners[model_input.virtual_engine][graph_batch_size]
+        # else:
+        model_executable = self.model
 
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
@@ -348,9 +351,9 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        if model_input.input_tokens.size(0)<100:
-            print(model_input.encoder_input_tokens, model_input.encoder_input_positions, model_input.encoder_attn_metadata, "((()))")
-            # import pdb; pdb.set_trace()
+        # if model_input.input_tokens.size(0)<100:
+        #     print(model_input.encoder_input_tokens, model_input.encoder_input_positions, model_input.encoder_attn_metadata, "((()))")
+        #     # import pdb; pdb.set_trace()
         with set_forward_context(model_input.encoder_attn_metadata, self.vllm_config, model_input.virtual_engine), set_tts_forward_context(model_input.attn_metadata, self.vllm_config, model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
@@ -362,7 +365,8 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
                 encoder_attn_metadata=model_input.encoder_attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs, device=self.device),
-                **seqlen_agnostic_kwargs)
+                **seqlen_agnostic_kwargs
+            )
 
         logits = self.model.compute_logits(
             hidden_or_intermediate_states,
@@ -480,8 +484,20 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         tts_seqs = []
         for seq_group_metadata in seq_group_metadata_list:
             llm_seq_group_metadata = seq_group_metadata.llm_seq_group_metadata
-            tts_seq_group_metadata = seq_group_metadata.tts_seq_group_metadata
             llm_seqs.append(llm_seq_group_metadata)
+
+            tts_seq_group_metadata = copy.deepcopy(seq_group_metadata.tts_seq_group_metadata)
+            if len(seq_group_metadata_list)<32:
+                print(llm_seq_group_metadata)
+            for seq_id in tts_seq_group_metadata.seq_data:
+                tts_seq_group_metadata.seq_data[seq_id].prompt_token_ids = [
+                    token_to_tts_codes(token_id, self.avatar_config.code_layers)
+                    for token_id in tts_seq_group_metadata.seq_data[seq_id]._prompt_token_ids
+                ]
+                tts_seq_group_metadata.seq_data[seq_id].output_token_ids = [
+                    token_to_tts_codes(token_id, self.avatar_config.code_layers)
+                    for token_id in tts_seq_group_metadata.seq_data[seq_id]._output_token_ids
+                ]
             tts_seqs.append(tts_seq_group_metadata)
 
         llm_model_input = self._prepare_model_input_tensors(llm_seqs, finished_requests_ids)
@@ -495,12 +511,10 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         )
 
         tts_model_input = self._prepare_model_input_tensors(tts_seqs, finished_requests_ids)
-        (seq_lens, query_lens, input_tokens, input_positions, attn_metadata) \
-        = self._prepare_voice_input_tensors(tts_model_input)
         tts_sampling_metadata = SamplingMetadata.prepare(
             tts_seqs,
-            seq_lens,
-            query_lens,
+            tts_model_input.seq_lens,
+            tts_model_input.query_lens,
             self.device,
             self.pin_memory,
             generators=generators
@@ -508,11 +522,6 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
 
         model_input = dataclasses.replace(
             tts_model_input,
-            seq_lens=seq_lens,
-            query_lens=query_lens,
-            input_tokens=input_tokens,
-            input_positions=input_positions,
-            attn_metadata=attn_metadata,
             encoder_input_tokens=llm_model_input.input_tokens,
             encoder_input_positions=llm_model_input.input_positions,
             encoder_attn_metadata=llm_model_input.attn_metadata,
@@ -523,44 +532,3 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         )
 
         return model_input
-
-    def _prepare_voice_input_tensors(self, model_input: AvatarModelInput) -> AttentionMetadata:
-        """Prepare input tensors for voice model by reshaping tokens and adjusting attention metadata.
-        
-        Args:
-            model_input: Input data containing tokens and attention metadata
-            
-        Returns:
-            Tuple of (input_tokens, input_positions, attn_metadata)
-        """
-        code_layers = self.avatar_config.code_layers
-
-        # Reshape input tokens to (batch_size * code_layers)
-        seq_lens = [item//self.avatar_config.code_layers for item in model_input.seq_lens]
-        query_lens = [item//self.avatar_config.code_layers for item in model_input.query_lens]
-        input_tokens = model_input.input_tokens.view(-1, code_layers)
-
-        # Update attention metadata dimensions
-        attn_metadata = model_input.attn_metadata
-        assert attn_metadata is not None
-
-        # Adjust all sequence length related fields by dividing by code_layers
-        attn_metadata.num_prefill_tokens //= code_layers
-        attn_metadata.seq_lens = [item // code_layers for item in attn_metadata.seq_lens]
-        attn_metadata.seq_lens_tensor //= code_layers
-        attn_metadata.seq_start_loc //= code_layers
-        attn_metadata.max_prefill_seq_len //= code_layers
-        attn_metadata.max_query_len //= code_layers
-        attn_metadata.max_decode_seq_len //= code_layers
-        attn_metadata.max_decode_query_len //= code_layers
-        attn_metadata.num_decode_tokens //= code_layers
-        attn_metadata.query_start_loc //= code_layers
-        attn_metadata.context_lens_tensor //= code_layers
-        attn_metadata.slot_mapping = attn_metadata.slot_mapping.view(len(attn_metadata.seq_lens), -1)[:, -1:].contiguous().view(-1)
-
-        # Reshape input positions tensor
-        input_positions = model_input.input_positions.view(len(attn_metadata.seq_lens), -1)
-        col_indices = torch.arange(0, input_positions.shape[1], 8, device=input_positions.device)
-        input_positions = (input_positions[:, col_indices]//code_layers).view(-1)
-
-        return seq_lens, query_lens, input_tokens, input_positions, attn_metadata

@@ -16,9 +16,9 @@ from vllm.sequence import (
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
+from avatar_infer.models_vllm.layers.sampler import AvatarSamplerOutput
 from avatar_infer.dataclass.sequence import (
     AvatarSequenceGroup,
-    AvatarSamplerOutput,
     AvatarSequenceGroupMetadata,
 )
 
