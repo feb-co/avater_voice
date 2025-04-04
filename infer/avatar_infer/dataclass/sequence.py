@@ -116,6 +116,15 @@ class TTSSequenceData(SequenceData):
     def output_token_ids(self, new_output_token_ids: GenericSequence[int]) -> None:
         self._output_token_ids = new_output_token_ids
         self._update_cached_all_tokens()
+    
+    def __repr__(self) -> str:
+        return (
+            f"TTSSequenceData("
+            f"prompt_token_ids={self._prompt_token_ids}, "
+            f"output_token_ids={self.output_token_ids}, "
+            f"cumulative_logprob={self.cumulative_logprob}, "
+            f"get_num_computed_tokens={self.get_num_computed_tokens()})"
+        )
 
 
 class TTSSequence(Sequence):
@@ -151,6 +160,14 @@ class TTSSequence(Sequence):
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+    
+    def __repr__(self) -> str:
+        return (
+            f"TTSSequence(seq_id={self.seq_id}, "
+            f"status={self.status.name}, "
+            f"num_blocks={self.n_blocks}, "
+            f"data={self.data})"
+        )
 
 
 class AvatarSequence:
@@ -280,3 +297,11 @@ class AvatarCompletionSequenceGroupOutput(CompletionSequenceGroupOutput):
     def llm_prompt_logprobs(self):
         """Access LLM prompt logprobs directly (same as .prompt_logprobs)"""
         return self.prompt_logprobs
+    
+    def __repr__(self) -> str:
+        return (
+            f"CompletionSequenceGroupOutput(llm_samples={self.samples}, "
+            f"llm_prompt_logprobs={self.prompt_logprobs}, "
+            f"tts_samples={self.tts_samples}, "
+            f"tts_prompt_logprobs={self.tts_prompt_logprobs})"
+        )

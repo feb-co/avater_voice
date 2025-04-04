@@ -26,6 +26,7 @@ from avatar_infer.dataclass.sequence import (
     TTSSequence,
     AvatarSequenceGroup,
     AvatarSequenceGroupMetadata,
+    AvatarCompletionSequenceGroupOutput,
 )
 from avatar_infer.dataclass.outputs import (
     PoolingRequestOutput,
@@ -158,7 +159,7 @@ class AvatarLLMEngine(LLMEngine):
         assert len(seq_group_metadata_list) == len(scheduler_outputs.scheduled_seq_groups)
 
         # Handle outputs (speculative decoding may produce multiple outputs)
-        outputs_by_sequence_group: List[List[SequenceGroupOutput]] = outputs
+        outputs_by_sequence_group: List[AvatarSamplerOutput] = outputs
 
         # Determine which sequence groups to process
         if request_id:
@@ -196,7 +197,7 @@ class AvatarLLMEngine(LLMEngine):
                 continue
 
             # Get the output for this sequence group
-            output: List[SequenceGroupOutput] = [outputs_by_sequence_group[0][i]]
+            output: List[AvatarCompletionSequenceGroupOutput] = [outputs_by_sequence_group[0][i]]
 
             # Update token counts for proper tracking
             if not is_async:
@@ -240,7 +241,6 @@ class AvatarLLMEngine(LLMEngine):
                 # Process probability logs and sampling results
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.llm_seq_group_metadata.do_sample:
-                    import pdb; pdb.set_trace()
                     self.output_processor.process_outputs(seq_group, output, is_async)
 
             # Check if the sequence group has finished after processing
@@ -304,7 +304,8 @@ class AvatarLLMEngine(LLMEngine):
             request_output = AvatarRequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
-                use_cache=self.use_cached_outputs)
+                use_cache=self.use_cached_outputs
+            )
 
             if request_output:
                 ctx.request_outputs.append(request_output)
@@ -733,7 +734,8 @@ class AvatarLLMEngine(LLMEngine):
         if self.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
-                "as performance will be severely degraded otherwise.")
+                "as performance will be severely degraded otherwise."
+            )
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
@@ -852,11 +854,11 @@ class AvatarLLMEngine(LLMEngine):
             )
 
             if outputs and allow_async_output_proc:
-                assert len(outputs) == 1, (
-                    "Async postprocessor expects only a single output set")
+                assert len(outputs) == 1, "Async postprocessor expects only a single output set"
 
                 self._advance_to_next_step(
-                    outputs[0], seq_group_metadata_list,
+                    outputs[0],
+                    seq_group_metadata_list,
                     scheduler_outputs.scheduled_seq_groups
                 )
 

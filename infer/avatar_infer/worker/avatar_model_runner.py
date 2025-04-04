@@ -351,9 +351,6 @@ class AvatarModelRunner(GPUModelRunnerBase[AvatarModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        # if model_input.input_tokens.size(0)<100:
-        #     print(model_input.encoder_input_tokens, model_input.encoder_input_positions, model_input.encoder_attn_metadata, "((()))")
-        #     # import pdb; pdb.set_trace()
         with set_forward_context(model_input.encoder_attn_metadata, self.vllm_config, model_input.virtual_engine), set_tts_forward_context(model_input.attn_metadata, self.vllm_config, model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,

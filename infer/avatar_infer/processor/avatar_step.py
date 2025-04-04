@@ -16,10 +16,11 @@ from vllm.sequence import (
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
-from avatar_infer.models_vllm.layers.sampler import AvatarSamplerOutput
+from avatar_infer.worker.avatar_scheduler import AvatarScheduler
 from avatar_infer.dataclass.sequence import (
+    TTSSequence,
     AvatarSequenceGroup,
-    AvatarSequenceGroupMetadata,
+    AvatarCompletionSequenceGroupOutput,
 )
 
 logger = init_logger(__name__)
@@ -81,7 +82,7 @@ class AvatarStepOutputProcessor(SequenceGroupOutputProcessor):
         self,
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
+        scheduler: List[AvatarScheduler],
         seq_counter: Counter,
         stop_checker: StopChecker
     ):
@@ -93,8 +94,8 @@ class AvatarStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_outputs(
         self,
-        sequence_group: SequenceGroup,
-        outputs: List[SequenceGroupOutput],
+        sequence_group: AvatarSequenceGroup,
+        outputs: List[AvatarCompletionSequenceGroupOutput],
         is_async: bool
     ) -> None:
         """Append all new tokens to sequences in the sequence group. Fork any
@@ -129,7 +130,7 @@ class AvatarStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_sequence_group_outputs(
         self,
         seq_group: AvatarSequenceGroup,
-        outputs: SequenceGroupOutput,
+        outputs: AvatarCompletionSequenceGroupOutput,
         is_async: bool
     ) -> None:
         llm_sampling_params = seq_group.llm_seq_group.sampling_params
@@ -137,7 +138,7 @@ class AvatarStepOutputProcessor(SequenceGroupOutputProcessor):
         llm_sample: SequenceOutput = outputs.llm_samples[0]
         tts_sample: SequenceOutput = outputs.tts_samples[0]
         llm_seq = seq_group.llm_seq_group.first_seq
-        tts_seq = seq_group.tts_seq_group.first_seq
+        tts_seq: TTSSequence = seq_group.tts_seq_group.first_seq
 
         if not is_async:
             llm_seq.append_token_id(llm_sample.output_token, llm_sample.logprobs)
@@ -157,5 +158,4 @@ class AvatarStepOutputProcessor(SequenceGroupOutputProcessor):
 
         if llm_seq.is_finished() and tts_seq.is_finished():
             for scheduler in self.scheduler:
-                scheduler.free_seq(llm_seq)
-                scheduler.free_seq(tts_seq)
+                scheduler.free_seq(llm_seq, tts_seq)
